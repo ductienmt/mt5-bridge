@@ -13,42 +13,44 @@ import (
 	"os"
 	"strings"
 	"time"
-
 )
 
 var (
-	flagAction     = flag.String("action", "", "BUY|SELL|BUY_STOP|SELL_STOP|CLOSE|CLOSE_ALL|MODIFY (required)")
-	flagSymbol     = flag.String("symbol", "", "Symbol, e.g. EURUSD (required)")
-	flagLot        = flag.Float64("lot", 0.01, "Lot size")
-	flagPrice      = flag.Float64("price", 0, "Price (for pending orders)")
-	flagSL         = flag.Float64("sl", 0, "Stop Loss price")
-	flagTP         = flag.Float64("tp", 0, "Take Profit price")
-	flagMagic      = flag.Int64("magic", 0, "Magic number")
-	flagComment    = flag.String("comment", "", "Order comment")
-	flagHost       = flag.String("host", "localhost:8080", "Bridge address")
-	flagHTTP       = flag.Bool("http", false, "Force HTTP mode")
-	flagTCP        = flag.Bool("tcp", false, "Force TCP mode")
-	flagBatch      = flag.String("batch", "", "File containing newline-separated JSON signals")
-	flagPnl     = flag.Float64("pnl", 0, "PnL (for CLOSE)")
+	flagAction = flag.String("action", "", "OPEN|CLOSE|EDIT (required)")
+	flagSide   = flag.String("side", "", "BUY|SELL|BUY_STOP|SELL_STOP|BUY_LIMIT|SELL_LIMIT")
+	flagSymbol = flag.String("symbol", "", "Symbol, e.g. EURUSD")
+	flagLot    = flag.Float64("lot", 0.01, "Lot size")
+	flagPrice  = flag.Float64("price", 0, "Price (for pending orders)")
+	flagSL     = flag.Float64("sl", 0, "Stop Loss price")
+	flagTP     = flag.Float64("tp", 0, "Take Profit price")
+	flagMagic  = flag.Int64("magic", 0, "Magic number")
+	flagPnl    = flag.Float64("pnl", 0, "PnL (for CLOSE)")
+	flagComment = flag.String("comment", "", "Order comment")
+	flagHost   = flag.String("host", "localhost:8080", "Bridge address")
+	flagHTTP   = flag.Bool("http", false, "Force HTTP mode")
+	flagTCP    = flag.Bool("tcp", false, "Force TCP mode")
+	flagBatch  = flag.String("batch", "", "File containing newline-separated JSON signals")
 	flagSymbolFile = flag.String("symbol-file", "", "File with symbols (one per line), sends CLOSE to each")
-	flagLoop       = flag.Int("loop", 0, "Send signal every N seconds (0=once)")
-	flagJSON       = flag.Bool("json", false, "Output full response JSON")
+	flagLoop   = flag.Int("loop", 0, "Send signal every N seconds (0=once)")
+	flagJSON   = flag.Bool("json", false, "Output full response JSON")
 )
 
 type signalPayload struct {
 	Action  string  `json:"action"`
-	Symbol  string  `json:"symbol"`
-	Lot     float64 `json:"lot"`
-	Price   float64 `json:"price"`
-	SL      float64 `json:"sl"`
-	TP      float64 `json:"tp"`
-	Magic   int64   `json:"magic"`
-	Pnl     float64 `json:"pnl"`
+	Side   string  `json:"side"`
+	Symbol string  `json:"symbol"`
+	Lot    float64 `json:"lot"`
+	Price  float64 `json:"price"`
+	SL     float64 `json:"sl"`
+	TP     float64 `json:"tp"`
+	Magic  int64   `json:"magic"`
+	Pnl    float64 `json:"pnl"`
 	Comment string  `json:"comment"`
 }
 
 type okResp struct {
 	Status string `json:"status"`
+	Pnl    float64 `json:"pnl"`
 	Queue  int    `json:"queue"`
 }
 
@@ -57,30 +59,38 @@ func main() {
 		fmt.Fprintf(os.Stderr, "MT5 Signal Sender CLI\n\nUsage:\n")
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
-		fmt.Fprintf(os.Stderr, "  go run sender.go -action BUY -symbol EURUSD -lot 0.1 -sl 1.0800 -tp 1.0900\n")
-		fmt.Fprintf(os.Stderr, "  go run sender.go -action CLOSE -symbol EURUSD\n")
-		fmt.Fprintf(os.Stderr, "  go run sender.go -action CLOSE_ALL\n")
-		fmt.Fprintf(os.Stderr, "  go run sender.go -action BUY_STOP -symbol EURUSD -lot 0.1 -price 1.0850 -sl 1.0800 -tp 1.0900\n")
-		fmt.Fprintf(os.Stderr, "  go run sender.go -host localhost:8081 -action BUY -symbol XAUUSD -lot 1.0\n")
+		fmt.Fprintf(os.Stderr, "  go run sender.go -action OPEN -side BUY -symbol EURUSD -lot 0.1 -sl 1.0800 -tp 1.0900\n")
+		fmt.Fprintf(os.Stderr, "  go run sender.go -action OPEN -side SELL -symbol EURUSD -lot 0.1 -sl 1.0900 -tp 1.0800\n")
+		fmt.Fprintf(os.Stderr, "  go run sender.go -action OPEN -side BUY_STOP -symbol EURUSD -lot 0.1 -price 1.0850 -sl 1.0800 -tp 1.0900\n")
+		fmt.Fprintf(os.Stderr, "  go run sender.go -action CLOSE -symbol EURUSD -pnl -15.50\n")
+		fmt.Fprintf(os.Stderr, "  go run sender.go -action CLOSE -pnl 50.00\n")
+		fmt.Fprintf(os.Stderr, "  go run sender.go -action EDIT -symbol EURUSD -sl 1.0750 -tp 1.0950\n")
+		fmt.Fprintf(os.Stderr, "  go run sender.go -host localhost:8081 -action OPEN -side BUY -symbol XAUUSD -lot 1.0\n")
 		fmt.Fprintf(os.Stderr, "  go run sender.go -batch signals.txt\n")
-		fmt.Fprintf(os.Stderr, "  go run sender.go -action BUY -symbol EURUSD -loop 5\n")
+		fmt.Fprintf(os.Stderr, "  go run sender.go -action OPEN -side BUY -symbol EURUSD -loop 5\n")
 	}
 	flag.Parse()
 
-	if *flagAction == "" || *flagSymbol == "" {
+	if *flagAction == "" {
+		flag.Usage()
+		os.Exit(1)
+	}
+	if (*flagAction == "OPEN" || *flagAction == "EDIT") && *flagSymbol == "" {
+		fmt.Fprintf(os.Stderr, "\n  Error: -symbol is required for OPEN and EDIT\n")
 		flag.Usage()
 		os.Exit(1)
 	}
 
 	payload := signalPayload{
 		Action:  strings.ToUpper(*flagAction),
-		Symbol:  strings.ToUpper(*flagSymbol),
-		Lot:     *flagLot,
-		Price:   *flagPrice,
-		SL:      *flagSL,
-		TP:      *flagTP,
-		Magic:   *flagMagic,
-		Pnl:     *flagPnl,
+		Side:   strings.ToUpper(*flagSide),
+		Symbol: strings.ToUpper(*flagSymbol),
+		Lot:    *flagLot,
+		Price:  *flagPrice,
+		SL:     *flagSL,
+		TP:     *flagTP,
+		Magic:  *flagMagic,
+		Pnl:    *flagPnl,
 		Comment: *flagComment,
 	}
 
@@ -92,7 +102,7 @@ func main() {
 		return
 	}
 	if *flagSymbolFile != "" {
-		sendSymbolFile(*flagSymbolFile, *flagAction, *flagMagic, *flagComment, sendFn)
+		sendSymbolFile(*flagSymbolFile, *flagAction, *flagMagic, *flagPnl, *flagComment, sendFn)
 		return
 	}
 	if *flagLoop > 0 {
@@ -157,8 +167,8 @@ func sendHTTP(host string, p signalPayload) error {
 
 	var r okResp
 	json.Unmarshal(data, &r)
-	fmt.Printf("  \x1b[32mqueued\x1b[0m  %s %s lot=%.2f @ %.5f | SL=%.5f TP=%.5f | queue=%d\n",
-		p.Action, p.Symbol, p.Lot, p.Price, p.SL, p.TP, r.Queue)
+	fmt.Printf("  \x1b[32mqueued\x1b[0m  %s %s %s lot=%.2f @ %.5f | pnl=%+.2f | queue=%d\n",
+		p.Action, p.Side, p.Symbol, p.Lot, p.Price, r.Pnl, r.Queue)
 	return nil
 }
 
@@ -192,8 +202,9 @@ func sendTCP(host string, body []byte, p signalPayload) error {
 		fmt.Printf("  \x1b[32mqueued\x1b[0m  (raw ack: %s)\n", string(buf[:n]))
 		return nil
 	}
-		fmt.Printf("  \x1b[32mqueued\x1b[0m  %s %s lot=%.2f | pnl=%+.2f | queue=%v\n",
-		*flagAction, *flagSymbol, *flagLot, ack["pnl"], ack["queue"])
+	pnl, _ := ack["pnl"].(float64)
+	fmt.Printf("  \x1b[32mqueued\x1b[0m  %s %s %s lot=%.2f | pnl=%+.2f | queue=%v\n",
+		p.Action, p.Side, p.Symbol, p.Lot, pnl, ack["queue"])
 	return nil
 }
 
@@ -219,7 +230,7 @@ func sendBatch(path string, sendFn func(signalPayload) error) {
 	}
 }
 
-func sendSymbolFile(path, action string, magic int64, comment string, sendFn func(signalPayload) error) {
+func sendSymbolFile(path, action string, magic int64, pnl float64, comment string, sendFn func(signalPayload) error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		log.Fatalf("Cannot read symbol file: %v", err)
@@ -234,6 +245,7 @@ func sendSymbolFile(path, action string, magic int64, comment string, sendFn fun
 			Action:  action,
 			Symbol:  sym,
 			Magic:   magic,
+			Pnl:     pnl,
 			Comment: comment,
 		}
 		if err := sendFn(p); err != nil {

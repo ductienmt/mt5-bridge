@@ -93,7 +93,7 @@ func handleRaw(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimSpace(string(body)), "|")
 	if len(parts) < 2 {
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprintf(w, "Usage: action|symbol|lot|price|sl|tp|magic|comment")
+		fmt.Fprintf(w, "Usage: action|side|symbol|lot|price|sl|tp|magic|pnl|comment")
 		return
 	}
 

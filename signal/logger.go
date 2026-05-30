@@ -31,29 +31,35 @@ func (l *Logger) Error(format string, args ...interface{}) {
 
 func (l *Logger) Order(s *Signal) {
 	action := strings.ToUpper(s.Action)
+	side := strings.ToUpper(s.Side)
 	var color, label, dir string
 
 	switch action {
-	case "BUY", "BUY_STOP", "BUY_LIMIT":
-		color = "\x1b[32m"
-		label = "BUY"
-		dir  = "\x1b[32mOPEN\x1b[0m"
-	case "SELL", "SELL_STOP", "SELL_LIMIT":
-		color = "\x1b[31m"
-		label = "SELL"
-		dir  = "\x1b[31mOPEN\x1b[0m"
-	case "CLOSE", "CLOSE_ALL":
+	case "OPEN":
+		dir = "\x1b[36mOPEN\x1b[0m"
+		switch side {
+		case "BUY", "BUY_STOP", "BUY_LIMIT":
+			color = "\x1b[32m"
+			label = side
+		case "SELL", "SELL_STOP", "SELL_LIMIT":
+			color = "\x1b[31m"
+			label = side
+		default:
+			color = "\x1b[34m"
+			label = side
+		}
+	case "CLOSE":
 		color = "\x1b[35m"
-		label = action
-		dir  = "\x1b[35mCLOSE\x1b[0m"
-	case "MODIFY":
+		label = ""
+		dir = "\x1b[35mCLOSE\x1b[0m"
+	case "EDIT":
 		color = "\x1b[33m"
-		label = "MODIFY"
-		dir  = "\x1b[33mEDIT\x1b[0m"
+		label = ""
+		dir = "\x1b[33mEDIT\x1b[0m"
 	default:
 		color = "\x1b[34m"
-		label = action
-		dir  = "\x1b[34m?\x1b[0m"
+		label = ""
+		dir = "\x1b[34m?\x1b[0m"
 	}
 
 	fmt.Fprintf(_out,
