@@ -19,6 +19,7 @@ services:
     restart: unless-stopped
     networks:
       - mt5-net
+      - dokploy-network
 
   # TCP Bridge — cho TradingBridgeSocketEA (DLL Socket mode)
   tcp-bridge:
@@ -39,7 +40,10 @@ services:
     restart: unless-stopped
     networks:
       - mt5-net
+      - dokploy-network
 
 networks:
   mt5-net:
     driver: bridge
+  dokploy-network:
+    external: true
