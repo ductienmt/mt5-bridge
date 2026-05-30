@@ -31,40 +31,36 @@ func (l *Logger) Error(format string, args ...interface{}) {
 
 func (l *Logger) Order(s *Signal) {
 	action := strings.ToUpper(s.Action)
-	var color string
-	var label string
+	var color, label, dir string
 
 	switch action {
-	case "BUY":
+	case "BUY", "BUY_STOP", "BUY_LIMIT":
 		color = "\x1b[32m"
 		label = "BUY"
-	case "SELL":
+		dir  = "\x1b[32mOPEN\x1b[0m"
+	case "SELL", "SELL_STOP", "SELL_LIMIT":
 		color = "\x1b[31m"
 		label = "SELL"
-	case "BUY_STOP":
-		color = "\x1b[32m"
-		label = "BUY_STOP"
-	case "SELL_STOP":
-		color = "\x1b[31m"
-		label = "SELL_STOP"
-	case "CLOSE":
+		dir  = "\x1b[31mOPEN\x1b[0m"
+	case "CLOSE", "CLOSE_ALL":
 		color = "\x1b[35m"
-		label = "CLOSE"
-	case "CLOSE_ALL":
-		color = "\x1b[35m"
-		label = "CLOSE_ALL"
+		label = action
+		dir  = "\x1b[35mCLOSE\x1b[0m"
 	case "MODIFY":
 		color = "\x1b[33m"
 		label = "MODIFY"
+		dir  = "\x1b[33mEDIT\x1b[0m"
 	default:
 		color = "\x1b[34m"
 		label = action
+		dir  = "\x1b[34m?\x1b[0m"
 	}
 
 	fmt.Fprintf(_out,
-		"\x1b[90m[%s]\x1b[0m %s%-12s\x1b[0m %-8s %s%.2f\x1b[0m @ %s%.5f\x1b[0m | SL:%s%.5f\x1b[0m | TP:%s%.5f\x1b[0m | Magic:%d | Pnl:%s%+.2f\x1b[0m | %s\n",
+		"\x1b[90m[%s]\x1b[0m %s%-12s\x1b[0m %s %-8s %s%.2f\x1b[0m @ %s%.5f\x1b[0m | SL:%s%.5f\x1b[0m | TP:%s%.5f\x1b[0m | Magic:%d | Pnl:%s%+.2f\x1b[0m | %s\n",
 		time.Now().Format("15:04:05.000"),
 		color, label,
+		dir,
 		"\x1b[37m"+s.Symbol+"\x1b[0m",
 		color, s.Lot,
 		color, s.Price,
