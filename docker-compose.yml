@@ -1,0 +1,45 @@
+services:
+
+  # HTTP Bridge — cho TradingBridgeEA (DLL HTTP mode)
+  http-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mt5-http-bridge
+    ports:
+      - "${MT5_HTTP_PORT:-8080}:8080"
+    environment:
+      - MT5_HTTP_PORT=8080
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - mt5-net
+
+  # TCP Bridge — cho TradingBridgeSocketEA (DLL Socket mode)
+  tcp-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mt5-tcp-bridge
+    ports:
+      - "${MT5_TCP_PORT:-8081}:8081"
+    environment:
+      - MT5_TCP_PORT=8081
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8081"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - mt5-net
+
+networks:
+  mt5-net:
+    driver: bridge
