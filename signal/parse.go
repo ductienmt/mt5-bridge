@@ -16,6 +16,7 @@ type RawSignal struct {
 	TP      any    `json:"tp"`
 	Price   any    `json:"price"`
 	Magic   any    `json:"magic"`
+	Pnl     any    `json:"pnl"`
 	Comment string `json:"comment"`
 }
 
@@ -32,11 +33,12 @@ func ParseSignal(data []byte) (Signal, error) {
 		Time:    time.Now(),
 	}
 
-	s.Lot = parseFloat(raw.Lot)
-	s.SL = parseFloat(raw.SL)
-	s.TP = parseFloat(raw.TP)
+	s.Lot   = parseFloat(raw.Lot)
+	s.SL    = parseFloat(raw.SL)
+	s.TP    = parseFloat(raw.TP)
 	s.Price = parseFloat(raw.Price)
 	s.Magic = parseInt(raw.Magic)
+	s.Pnl   = parseFloat(raw.Pnl)
 
 	return s, nil
 }

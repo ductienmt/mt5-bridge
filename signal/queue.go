@@ -7,20 +7,21 @@ import (
 )
 
 type Signal struct {
-	Action  string
-	Symbol  string
-	Lot     float64
-	SL      float64
-	TP      float64
-	Price   float64
-	Magic   int64
+	Action string
+	Symbol string
+	Lot    float64
+	SL     float64
+	TP     float64
+	Price  float64
+	Magic  int64
+	Pnl    float64
 	Comment string
-	Time    time.Time
+	Time   time.Time
 }
 
 func (s Signal) String() string {
-	return fmt.Sprintf("%s %s lot=%.2f price=%.5f sl=%.5f tp=%.5f magic=%d comment=%s",
-		s.Action, s.Symbol, s.Lot, s.Price, s.SL, s.TP, s.Magic, s.Comment)
+	return fmt.Sprintf("%s %s lot=%.2f price=%.5f sl=%.5f tp=%.5f magic=%d pnl=%+.2f comment=%s",
+		s.Action, s.Symbol, s.Lot, s.Price, s.SL, s.TP, s.Magic, s.Pnl, s.Comment)
 }
 
 type Queue struct {

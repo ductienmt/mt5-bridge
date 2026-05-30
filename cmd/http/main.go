@@ -25,8 +25,9 @@ type ErrorResp struct {
 }
 
 type OKResp struct {
-	Status string `json:"status"`
-	Queue  int    `json:"queue"`
+	Status string  `json:"status"`
+	Pnl    float64 `json:"pnl"`
+	Queue  int     `json:"queue"`
 }
 
 func handleSignal(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +57,7 @@ func handleSignal(w http.ResponseWriter, r *http.Request) {
 	lg.Order(&sig)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(OKResp{Status: "queued", Queue: q.Size()})
+	json.NewEncoder(w).Encode(OKResp{Status: "queued", Pnl: sig.Pnl, Queue: q.Size()})
 }
 
 func handleQueue(w http.ResponseWriter, r *http.Request) {
@@ -109,7 +110,7 @@ func handleRaw(w http.ResponseWriter, r *http.Request) {
 	lg.Order(&sig)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(OKResp{Status: "queued", Queue: q.Size()})
+	json.NewEncoder(w).Encode(OKResp{Status: "queued", Pnl: sig.Pnl, Queue: q.Size()})
 }
 
 func main() {

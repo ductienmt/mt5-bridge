@@ -147,6 +147,7 @@ func handleConn(conn net.Conn) {
 		ack := map[string]any{
 			"status": "queued",
 			"queue":  q.Size(),
+			"pnl":    sig.Pnl,
 			"time":   time.Now().Format(time.RFC3339),
 		}
 		ackBytes, _ := json.Marshal(ack)
@@ -174,6 +175,7 @@ func parsePipe(raw string) (sigpkg.Signal, bool) {
 	if len(parts) > 5 { fmt.Sscanf(parts[5], "%f", &sig.TP) }
 	if len(parts) > 6 { fmt.Sscanf(parts[6], "%d", &sig.Magic) }
 	if len(parts) > 7 { sig.Comment = parts[7] }
+	if len(parts) > 8 { fmt.Sscanf(parts[8], "%f", &sig.Pnl) }
 	return sig, true
 }
 

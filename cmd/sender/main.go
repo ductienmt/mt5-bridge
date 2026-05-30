@@ -29,6 +29,7 @@ var (
 	flagHTTP       = flag.Bool("http", false, "Force HTTP mode")
 	flagTCP        = flag.Bool("tcp", false, "Force TCP mode")
 	flagBatch      = flag.String("batch", "", "File containing newline-separated JSON signals")
+	flagPnl     = flag.Float64("pnl", 0, "PnL (for CLOSE)")
 	flagSymbolFile = flag.String("symbol-file", "", "File with symbols (one per line), sends CLOSE to each")
 	flagLoop       = flag.Int("loop", 0, "Send signal every N seconds (0=once)")
 	flagJSON       = flag.Bool("json", false, "Output full response JSON")
@@ -42,6 +43,7 @@ type signalPayload struct {
 	SL      float64 `json:"sl"`
 	TP      float64 `json:"tp"`
 	Magic   int64   `json:"magic"`
+	Pnl     float64 `json:"pnl"`
 	Comment string  `json:"comment"`
 }
 
@@ -78,6 +80,7 @@ func main() {
 		SL:      *flagSL,
 		TP:      *flagTP,
 		Magic:   *flagMagic,
+		Pnl:     *flagPnl,
 		Comment: *flagComment,
 	}
 
@@ -189,8 +192,8 @@ func sendTCP(host string, body []byte, p signalPayload) error {
 		fmt.Printf("  \x1b[32mqueued\x1b[0m  (raw ack: %s)\n", string(buf[:n]))
 		return nil
 	}
-	fmt.Printf("  \x1b[32mqueued\x1b[0m  %s %s lot=%.2f | queue=%v\n",
-		*flagAction, *flagSymbol, *flagLot, ack["queue"])
+		fmt.Printf("  \x1b[32mqueued\x1b[0m  %s %s lot=%.2f | pnl=%+.2f | queue=%v\n",
+		*flagAction, *flagSymbol, *flagLot, ack["pnl"], ack["queue"])
 	return nil
 }
 

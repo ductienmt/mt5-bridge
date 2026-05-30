@@ -62,7 +62,7 @@ func (l *Logger) Order(s *Signal) {
 	}
 
 	fmt.Fprintf(_out,
-		"\x1b[90m[%s]\x1b[0m %s%-12s\x1b[0m %-8s %s%.2f\x1b[0m @ %s%.5f\x1b[0m | SL:%s%.5f\x1b[0m | TP:%s%.5f\x1b[0m | Magic:%d | %s\n",
+		"\x1b[90m[%s]\x1b[0m %s%-12s\x1b[0m %-8s %s%.2f\x1b[0m @ %s%.5f\x1b[0m | SL:%s%.5f\x1b[0m | TP:%s%.5f\x1b[0m | Magic:%d | Pnl:%s%+.2f\x1b[0m | %s\n",
 		time.Now().Format("15:04:05.000"),
 		color, label,
 		"\x1b[37m"+s.Symbol+"\x1b[0m",
@@ -70,7 +70,9 @@ func (l *Logger) Order(s *Signal) {
 		color, s.Price,
 		color, s.SL,
 		color, s.TP,
-		s.Magic, s.Comment)
+		s.Magic,
+		color, s.Pnl,
+		s.Comment)
 }
 
 func (l *Logger) Queue(size int) {
