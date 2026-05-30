@@ -97,14 +97,14 @@ func handleRaw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sig := sigpkg.Signal{Action: parts[0], Time: time.Now()}
-	if len(parts) > 1 { sig.Symbol = parts[1] }
-	if len(parts) > 2 { fmt.Sscanf(parts[2], "%f", &sig.Lot) }
-	if len(parts) > 3 { fmt.Sscanf(parts[3], "%f", &sig.Price) }
-	if len(parts) > 4 { fmt.Sscanf(parts[4], "%f", &sig.SL) }
-	if len(parts) > 5 { fmt.Sscanf(parts[5], "%f", &sig.TP) }
-	if len(parts) > 6 { fmt.Sscanf(parts[6], "%d", &sig.Magic) }
-	if len(parts) > 7 { sig.Comment = parts[7] }
+	sig := sigpkg.Signal{Action: parts[0], Side: parts[1], Symbol: parts[2], Time: time.Now()}
+	if len(parts) > 3 { fmt.Sscanf(parts[3], "%f", &sig.Lot) }
+	if len(parts) > 4 { fmt.Sscanf(parts[4], "%f", &sig.Price) }
+	if len(parts) > 5 { fmt.Sscanf(parts[5], "%f", &sig.SL) }
+	if len(parts) > 6 { fmt.Sscanf(parts[6], "%f", &sig.TP) }
+	if len(parts) > 7 { fmt.Sscanf(parts[7], "%d", &sig.Magic) }
+	if len(parts) > 8 { fmt.Sscanf(parts[8], "%f", &sig.Pnl) }
+	if len(parts) > 9 { sig.Comment = parts[9] }
 
 	q.Push(sig)
 	lg.Order(&sig)

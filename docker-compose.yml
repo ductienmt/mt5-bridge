@@ -10,6 +10,7 @@ services:
       - "${MT5_HTTP_PORT:-1080}:8080"
     environment:
       - MT5_HTTP_PORT=8080
+      - BINARY=http-bridge
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
       interval: 30s
@@ -19,7 +20,6 @@ services:
     restart: unless-stopped
     networks:
       - mt5-net
-      # - dokploy-network
 
   # TCP Bridge — cho TradingBridgeSocketEA (DLL Socket mode)
   tcp-bridge:
@@ -31,6 +31,7 @@ services:
       - "${MT5_TCP_PORT:-1081}:8081"
     environment:
       - MT5_TCP_PORT=8081
+      - BINARY=tcp-bridge
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "8081"]
       interval: 30s
@@ -40,10 +41,31 @@ services:
     restart: unless-stopped
     networks:
       - mt5-net
-      # - dokploy-network
+
+  # Relay — nhận signal từ TCP bridge rồi forward lên server HTTP khác
+  # Ví dụ: forward sang server copy-trade 103.72.56.53:8080
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mt5-relay
+    ports:
+      - "${RELAY_PORT:-1082}:8082"
+    environment:
+      - RELAY_PORT=8082
+      - FORWARD_TO_URL=${FORWARD_TO_URL:-}
+      - BINARY=relay
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8082"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - mt5-net
+
 
 networks:
   mt5-net:
     driver: bridge
-    # dokploy-network:
-    #   external: true
