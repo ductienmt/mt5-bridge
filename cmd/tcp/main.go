@@ -239,7 +239,7 @@ func handleConn(conn net.Conn) {
 	}
 
 	if err := scanner.Err(); err != nil {
-		if _, ok := err.(*net.OpError); !ok && err != io.EOF {
+		if !strings.Contains(err.Error(), "use of closed network connection") && err.Error() != "EOF" {
 			lg.Error("Connection error [%s]: %v", addr, err)
 		}
 	}
