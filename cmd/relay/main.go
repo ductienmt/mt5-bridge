@@ -31,17 +31,16 @@ type Signal struct {
 	Comment string  `json:"comment"`
 }
 
-type orderLog struct {
-	mu     sync.Mutex
-	file   *os.File
-	path   string
+type fileLogger struct {
+	mu   sync.Mutex
+	file *os.File
 }
 
 var (
 	httpClient = &http.Client{Timeout: 10 * time.Second}
 	forwardURL string
-	lg        = newLogger()
-	orderLog    *orderLog
+	lg         = newLogger()
+	fl         *fileLogger
 )
 
 func main() {
@@ -53,8 +52,8 @@ func main() {
 	forwardURL = strings.TrimSuffix(forwardURL, "/")
 	lg.info("FORWARD_TO_URL = %s", forwardURL)
 
-	orderLog = newOrderLog("/app/logs/orders.log")
-	if orderLog == nil {
+	fl = newFileLogger()
+	if fl == nil {
 		lg.warn("Order log disabled (write permission denied)")
 	}
 
@@ -74,8 +73,8 @@ func main() {
 		<-sigChan
 		lg.info("Shutting down relay...")
 		ln.Close()
-		if orderLog != nil {
-			orderLog.close()
+		if fl != nil {
+			fl.close()
 		}
 		os.Exit(0)
 	}()
@@ -95,7 +94,6 @@ func main() {
 
 func handleConn(conn net.Conn) {
 	defer conn.Close()
-	addr := conn.RemoteAddr().String()
 
 	scanner := bufio.NewScanner(conn)
 	buf := make([]byte, 0, 64*1024)
@@ -117,25 +115,20 @@ func handleConn(conn net.Conn) {
 			continue
 		}
 
-		sigRaw := string(line)
 		sentAt := time.Now()
 
-		// Forward lên HTTP server
 		respBody, httpStatus, err := forwardSignal(sig)
-		recvAt := time.Now()
-		latency := recvAt.Sub(sentAt)
+		latency := time.Since(sentAt)
 
 		if err != nil {
-			lg.error("[%s] forward error: %v", addr, err)
-			orderLog.append(sig, sentAt, "", httpStatus, err.Error(), latency)
+			lg.error("forward error: %v", err)
+			fl.append(sig, sentAt, "", httpStatus, err.Error(), latency)
 			conn.Write([]byte(fmt.Sprintf(`{"ok":false,"error":"%v"}`+"\n", err)))
 			continue
 		}
 
-		// Log ra console + file
 		lg.order(&sig, httpStatus, latency)
-		orderLog.append(sig, sentAt, string(respBody), httpStatus, "", latency)
-
+		fl.append(sig, sentAt, string(respBody), httpStatus, "", latency)
 		conn.Write(append(respBody, '\n'))
 	}
 }
@@ -210,40 +203,33 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
-// ─── Order Log ───────────────────────────────────────────────────────────
+// ─── File Logger ─────────────────────────────────────────────────────────
 
-func newOrderLog(path string) *orderLog {
-	dir := strings.TrimSuffix(path, "/orders.log")
-	if dir == path {
-		dir = "."
-	}
+func newFileLogger() *fileLogger {
+	logPath := getEnv("ORDER_LOG_PATH", "/app/logs/orders.log")
+	dir := strings.TrimSuffix(logPath, "/orders.log")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil
 	}
-	// Lưu log tại /app/orders.log (được mount ra host)
-	path := getEnv("ORDER_LOG_PATH", "/app/orders.log")
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil
 	}
-	return &orderLog{file: f, path: path}
+	return &fileLogger{file: f}
 }
 
-func (l *orderLog) append(sig Signal, sentAt time.Time, respBody string, httpStatus int, errMsg string, latency time.Duration) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	ts := sentAt.Format(time.RFC3339)
-
-	var status string
-	if errMsg != "" {
-		status = fmt.Sprintf("ERROR:%s", errMsg)
-	} else {
-		status = fmt.Sprintf("OK:%d", httpStatus)
+func (l *fileLogger) append(sig Signal, sentAt time.Time, respBody string, httpStatus int, errMsg string, latency time.Duration) {
+	if l == nil {
+		return
 	}
 
-	// CSV: ts, action, side, symbol, lot, price, sl, tp, magic, pnl, comment, status, latency_ms, resp_body
+	ts := sentAt.Format(time.RFC3339)
+	status := fmt.Sprintf("OK:%d", httpStatus)
+	if errMsg != "" {
+		status = "ERROR:" + errMsg
+	}
+
 	line := fmt.Sprintf(
 		"%s|%s|%s|%s|%.2f|%.5f|%.5f|%.5f|%d|%.2f|%s|%s|%.0f|%s\n",
 		ts,
@@ -262,11 +248,16 @@ func (l *orderLog) append(sig Signal, sentAt time.Time, respBody string, httpSta
 		strings.TrimSpace(respBody),
 	)
 
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.file.WriteString(line)
 	l.file.Sync()
 }
 
-func (l *orderLog) close() {
+func (l *fileLogger) close() {
+	if l == nil {
+		return
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.file != nil {
@@ -297,23 +288,20 @@ func (l *logger) order(s *Signal, httpStatus int, latency time.Duration) {
 	side := strings.ToUpper(s.Side)
 
 	var color string
-	var ok bool
 	switch action {
 	case "OPEN":
 		switch side {
 		case "BUY", "BUY_STOP", "BUY_LIMIT":
-			color, ok = "\x1b[32m", true
+			color = "\x1b[32m"
 		case "SELL", "SELL_STOP", "SELL_LIMIT":
-			color, ok = "\x1b[31m", true
+			color = "\x1b[31m"
 		default:
 			color = "\x1b[34m"
 		}
 	case "CLOSE":
 		color = "\x1b[35m"
-		ok = true
 	case "EDIT":
 		color = "\x1b[33m"
-		ok = true
 	default:
 		color = "\x1b[34m"
 	}
@@ -322,7 +310,7 @@ func (l *logger) order(s *Signal, httpStatus int, latency time.Duration) {
 	defer l.mu.Unlock()
 
 	fmt.Fprintf(os.Stdout,
-		"[%s] %sORDER\x1b[0m %s%-6s %s\x1b[0m %-8s lot=%.2f @ %.5f | SL=%.5f TP=%.5f | magic=%d | pnl=%+.2f | resp=%d | %s\n",
+		"[%s] %sORDER\x1b[0m %s%-6s %s\x1b[0m lot=%.2f @ %.5f | SL=%.5f TP=%.5f | magic=%d | pnl=%+.2f | resp=%d | %s\n",
 		time.Now().Format("15:04:05"),
 		color,
 		action, side,
