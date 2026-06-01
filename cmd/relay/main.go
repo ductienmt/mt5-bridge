@@ -18,6 +18,21 @@ import (
 	"time"
 )
 
+// Signal là input nhận từ tcp-bridge (từ MT5 EA)
+// action = OPEN/CLOSE/EDIT, side = BUY/SELL
+type Signal struct {
+	Action   string  `json:"action"`
+	Side     string  `json:"side"`
+	Symbol   string  `json:"symbol"`
+	Lot      float64 `json:"lot"`
+	Price    float64 `json:"price"`
+	SL       float64 `json:"sl"`
+	TP       float64 `json:"tp"`
+	Magic    int64   `json:"magic"`
+	Pnl      float64 `json:"pnl"`
+	Comment  string  `json:"comment"`
+}
+
 // HttpPayload là payload gửi lên FORWARD_TO_URL/signal
 // action = BUY/SELL (thứ server cần)
 // type = OPEN/CLOSE/EDIT (metadata, không gửi đi)
@@ -36,14 +51,16 @@ type HttpPayload struct {
 
 func signalToHttpPayload(s *Signal) *HttpPayload {
 	return &HttpPayload{
-		Action:  s.Side,   // BUY/SELL — thứ server cần
-		// Type:    s.Action,  // OPEN/CLOSE/EDIT — metadata
+		Action:  s.Side,    // BUY/SELL — thứ server cần
+		Type:    s.Action,  // OPEN/CLOSE/EDIT — metadata
 		Symbol:  s.Symbol,
 		Lot:     s.Lot,
 		Price:   s.Price,
 		SL:      s.SL,
 		TP:      s.TP,
 		Magic:   s.Magic,
+		Pnl:     s.Pnl,
+		Comment: s.Comment,
 	}
 }
 
