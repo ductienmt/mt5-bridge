@@ -25,7 +25,7 @@ type Signal struct {
 	Side     string  `json:"side"`
 	Symbol   string  `json:"symbol"`
 	Lot      float64 `json:"lot"`
-	Price    float64 `json:"price"`
+	// Price    float64 `json:"price"`
 	SL       float64 `json:"sl"`
 	TP       float64 `json:"tp"`
 	Magic    int64   `json:"magic"`
@@ -40,7 +40,7 @@ type HttpPayload struct {
 	Action  string  `json:"action"`
 	Symbol  string  `json:"symbol"`
 	Lot     float64 `json:"lot"`
-	Price   float64 `json:"price"`
+	// Price   float64 `json:"price"`
 	SL      float64 `json:"sl"`
 	TP      float64 `json:"tp"`
 	Magic   int64   `json:"magic"`
@@ -70,7 +70,7 @@ func signalToHttpPayload(s *Signal) *HttpPayload {
 		Action:  effectiveAction(s),
 		Symbol:  s.Symbol,
 		Lot:     s.Lot,
-		Price:   s.Price,
+		// Price:   s.Price,
 		SL:      s.SL,
 		TP:      s.TP,
 		Magic:   s.Magic,
@@ -273,20 +273,19 @@ func (l *logger) received(from string, s *Signal) {
 		comment = " | " + s.Comment
 	}
 
-	fmt.Printf(
-		"[%s] \x1b[36mRECV\x1b[0m \x1b[90mfrom %s\x1b[0m | %s %s %.2f @ %.5f | SL=%.5f TP=%.5f | magic=%d | pnl=%+.2f%s\n",
-		time.Now().Format("15:04:05"),
-		from,
-		strings.ToUpper(s.Action),
-		strings.ToUpper(s.Side),
-		s.Lot,
-		s.Price,
-		s.SL,
-		s.TP,
-		s.Magic,
-		s.Pnl,
-		comment,
-	)
+	// fmt.Printf(
+	// 	"[%s] \x1b[36mRECV\x1b[0m \x1b[90mfrom %s\x1b[0m | %s %s %.2f | SL=%.5f TP=%.5f | magic=%d | pnl=%+.2f%s\n",
+	// 	time.Now().Format("15:04:05"),
+	// 	from,
+	// 	strings.ToUpper(s.Action),
+	// 	strings.ToUpper(s.Side),
+	// 	s.Lot,
+	// 	s.SL,
+	// 	s.TP,
+	// 	s.Magic,
+	// 	s.Pnl,
+	// 	comment,
+	// )
 }
 
 func (l *logger) sent(to string, p *HttpPayload, httpStatus int, latency time.Duration) {
@@ -313,13 +312,12 @@ func (l *logger) sent(to string, p *HttpPayload, httpStatus int, latency time.Du
 	}
 
 	fmt.Printf(
-		"[%s] \x1b[36mSENT\x1b[0m \x1b[90m-> %s\x1b[0m | %s%s %s %.2f @ %.5f | SL=%.5f TP=%.5f | magic=%d | pnl=%+.2f | resp=%d | %s%s\n",
+		"[%s] \x1b[36mSENT\x1b[0m \x1b[90m-> %s\x1b[0m | %s%s %s %.2f | SL=%.5f TP=%.5f | magic=%d | pnl=%+.2f | resp=%d | %s%s\n",
 		time.Now().Format("15:04:05"),
 		to,
 		color, strings.ToUpper(p.Action),
 		p.Symbol,
 		p.Lot,
-		p.Price,
 		p.SL,
 		p.TP,
 		p.Magic,

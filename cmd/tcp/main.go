@@ -213,7 +213,7 @@ func handleConn(conn net.Conn) {
 
 		if relayHost != "" {
 			sendToRelay(line)
-			tcpLog("FWD ", addr, &sig)
+			// tcpLog("FWD ", addr, &sig)
 		}
 
 		ack := map[string]any{
