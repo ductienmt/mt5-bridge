@@ -56,6 +56,8 @@ services:
       - RELAY_PORT=8082
       - FORWARD_TO_URL=${FORWARD_TO_URL:-}
       - BINARY=relay
+    volumes:
+      - ./logs:/app/logs:rw
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "8082"]
       interval: 30s
