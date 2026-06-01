@@ -18,9 +18,12 @@ import (
 	"time"
 )
 
-type Signal struct {
-	Action   string  `json:"action"`
-	Side    string  `json:"side"`
+// HttpPayload là payload gửi lên FORWARD_TO_URL/signal
+// action = BUY/SELL (thứ server cần)
+// type = OPEN/CLOSE/EDIT (metadata, không gửi đi)
+type HttpPayload struct {
+	Action  string  `json:"action"`  // BUY/SELL
+	Type    string  `json:"type"`    // OPEN/CLOSE/EDIT
 	Symbol  string  `json:"symbol"`
 	Lot     float64 `json:"lot"`
 	Price   float64 `json:"price"`
@@ -29,6 +32,19 @@ type Signal struct {
 	Magic   int64   `json:"magic"`
 	Pnl     float64 `json:"pnl"`
 	Comment string  `json:"comment"`
+}
+
+func signalToHttpPayload(s *Signal) *HttpPayload {
+	return &HttpPayload{
+		Action:  s.Side,   // BUY/SELL — thứ server cần
+		// Type:    s.Action,  // OPEN/CLOSE/EDIT — metadata
+		Symbol:  s.Symbol,
+		Lot:     s.Lot,
+		Price:   s.Price,
+		SL:      s.SL,
+		TP:      s.TP,
+		Magic:   s.Magic,
+	}
 }
 
 var (
@@ -108,25 +124,28 @@ func handleConn(conn net.Conn) {
 		// ── RECV ──────────────────────────────────────────
 		lg.received(peer, &sig)
 
+		// Build payload: action=BUY/SELL, type=OPEN/CLOSE/EDIT
+		payload := signalToHttpPayload(&sig)
+
 		// Forward lên HTTP server
-		respBody, httpStatus, err := forwardSignal(sig)
+		respBody, httpStatus, err := forwardSignal(payload)
 		latency := time.Since(sentAt)
 
 		if err != nil {
 			lg.error("FWD->%s FAIL %s %s %s %.2f | %v",
-				forwardURL, sig.Action, sig.Side, sig.Symbol, sig.Lot, err)
+				forwardURL, payload.Type, payload.Action, payload.Symbol, payload.Lot, err)
 			conn.Write([]byte(fmt.Sprintf(`{"ok":false,"error":"%v"}`+"\n", err)))
 			continue
 		}
 
 		// ── SENT ──────────────────────────────────────────
-		lg.sent(forwardURL, &sig, httpStatus, latency)
+		lg.sent(forwardURL, payload, httpStatus, latency)
 		conn.Write(append(respBody, '\n'))
 	}
 }
 
-func forwardSignal(sig Signal) ([]byte, int, error) {
-	body, err := json.Marshal(sig)
+func forwardSignal(payload *HttpPayload) ([]byte, int, error) {
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -238,11 +257,11 @@ func (l *logger) received(from string, s *Signal) {
 	)
 }
 
-func (l *logger) sent(to string, s *Signal, httpStatus int, latency time.Duration) {
+func (l *logger) sent(to string, p *HttpPayload, httpStatus int, latency time.Duration) {
 	var color string
-	switch strings.ToUpper(s.Action) {
+	switch strings.ToUpper(p.Type) {
 	case "OPEN":
-		if strings.HasPrefix(strings.ToUpper(s.Side), "BUY") {
+		if strings.HasPrefix(strings.ToUpper(p.Action), "BUY") {
 			color = "\x1b[32m"
 		} else {
 			color = "\x1b[31m"
@@ -259,22 +278,22 @@ func (l *logger) sent(to string, s *Signal, httpStatus int, latency time.Duratio
 	defer l.mu.Unlock()
 
 	comment := ""
-	if s.Comment != "" {
-		comment = " | " + s.Comment
+	if p.Comment != "" {
+		comment = " | " + p.Comment
 	}
 
 	fmt.Printf(
 		"[%s] \x1b[36mSENT\x1b[0m \x1b[90m-> %s\x1b[0m | %s%s %s %.2f @ %.5f | SL=%.5f TP=%.5f | magic=%d | pnl=%+.2f | resp=%d | %s%s\n",
 		time.Now().Format("15:04:05"),
 		to,
-		color, strings.ToUpper(s.Action),
-		strings.ToUpper(s.Side),
-		s.Lot,
-		s.Price,
-		s.SL,
-		s.TP,
-		s.Magic,
-		s.Pnl,
+		color, strings.ToUpper(p.Type),
+		strings.ToUpper(p.Action),
+		p.Lot,
+		p.Price,
+		p.SL,
+		p.TP,
+		p.Magic,
+		p.Pnl,
 		httpStatus,
 		latency.Round(time.Millisecond),
 		comment,
