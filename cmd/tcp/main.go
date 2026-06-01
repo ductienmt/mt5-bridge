@@ -6,7 +6,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -121,32 +120,6 @@ func keepRelayConnection() {
 		relayMu.Unlock()
 
 		lg.Info("Connected to relay %s", relayHost)
-
-		// Đọc response từ relay (relay sẽ gửi ack sau mỗi forward)
-		go func() {
-			buf := make([]byte, 4096)
-			for {
-				if relayConn == nil {
-					break
-				}
-				relayConn.SetReadDeadline(time.Now().Add(30 * time.Second))
-				n, err := relayConn.Read(buf)
-				if err != nil {
-					if !strings.Contains(err.Error(), "timeout") {
-						lg.Warn("Relay connection closed: %v", err)
-					}
-					break
-				}
-				lg.Info("Relay ack: %s", string(buf[:n]))
-			}
-
-			relayMu.Lock()
-			if relayConn != nil {
-				relayConn.Close()
-				relayConn = nil
-			}
-			relayMu.Unlock()
-		}()
 
 		// Chờ bị đóng hoặc rớt
 		<-relayClose
