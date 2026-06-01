@@ -138,19 +138,11 @@ func sendToRelay(line []byte) {
 		return
 	}
 
-	// Gửi theo đúng protocol: [4 bytes length][JSON]
+	// Gửi plain JSON newline-delimited (relay dùng bufio.Scanner)
 	data := append(line, '\n')
-	length := uint32(len(data))
-	prefix := []byte{
-		byte(length >> 24),
-		byte(length >> 16),
-		byte(length >> 8),
-		byte(length),
-	}
-
-	_, err := conn.Write(append(prefix, data...))
+	_, err := conn.Write(data)
 	if err != nil {
-		lg.Error("Failed to forward to relay: %v", err)
+		lg.Warn("Failed to forward to relay: %v", err)
 		relayMu.Lock()
 		if relayConn != nil {
 			relayConn.Close()
