@@ -201,13 +201,11 @@ func handleConn(conn net.Conn) {
 				lg.Warn("Invalid message from %s: %s", addr, raw)
 				continue
 			}
-			// Push vào queue cho DLL
 			q.Push(sig)
-			lg.Info("RECV from MT5 | %s %s %s %.2f @ %.5f | QUEUE", sig.Action, sig.Side, sig.Symbol, sig.Lot, sig.Price)
-			// Forward sang relay nếu có
+			tcpLog("RECV", addr, &sig)
 			if relayHost != "" {
 				sendToRelay(line)
-				lg.Info("SENT to relay %s | %s %s %s %.2f @ %.5f", relayHost, sig.Action, sig.Side, sig.Symbol, sig.Lot, sig.Price)
+				tcpLog("FWD ", addr, &sig)
 			}
 			continue
 		}
@@ -218,14 +216,12 @@ func handleConn(conn net.Conn) {
 			continue
 		}
 
-		// Push vào queue cho DLL
 		q.Push(sig)
-		lg.Info("RECV from MT5 | %s %s %s %.2f @ %.5f | QUEUE", sig.Action, sig.Side, sig.Symbol, sig.Lot, sig.Price)
+		tcpLog("RECV", addr, &sig)
 
-		// Forward sang relay nếu có
 		if relayHost != "" {
 			sendToRelay(line)
-			lg.Info("SENT to relay %s | %s %s %s %.2f @ %.5f", relayHost, sig.Action, sig.Side, sig.Symbol, sig.Lot, sig.Price)
+			tcpLog("FWD ", addr, &sig)
 		}
 
 		ack := map[string]any{
@@ -268,4 +264,42 @@ func getEnv(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// tcpLog in ra console chi tiết signal với màu sắc theo action.
+func tcpLog(label, from string, s *sigpkg.Signal) {
+	var color string
+	switch strings.ToUpper(s.Action) {
+	case "OPEN":
+		if strings.HasPrefix(strings.ToUpper(s.Side), "BUY") {
+			color = "\x1b[32m"
+		} else {
+			color = "\x1b[31m"
+		}
+	case "CLOSE":
+		color = "\x1b[35m"
+	case "EDIT":
+		color = "\x1b[33m"
+	default:
+		color = "\x1b[34m"
+	}
+
+	comment := ""
+	if s.Comment != "" {
+		comment = " | " + s.Comment
+	}
+
+	fmt.Printf(
+		"[%s] %s %s%s %s %.2f @ %.5f | SL=%.5f TP=%.5f | magic=%d | pnl=%+.2f | %s%s\n",
+		time.Now().Format("15:04:05"),
+		label,
+		color, strings.ToUpper(s.Action),
+		strings.ToUpper(s.Side),
+		s.Lot, s.Price,
+		s.SL, s.TP,
+		s.Magic,
+		s.Pnl,
+		from,
+		comment,
+	)
 }

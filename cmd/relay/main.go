@@ -31,16 +31,10 @@ type Signal struct {
 	Comment string  `json:"comment"`
 }
 
-type fileLogger struct {
-	mu   sync.Mutex
-	file *os.File
-}
-
 var (
 	httpClient = &http.Client{Timeout: 10 * time.Second}
 	forwardURL string
 	lg         = newLogger()
-	fl         *fileLogger
 )
 
 func main() {
@@ -51,11 +45,6 @@ func main() {
 	}
 	forwardURL = strings.TrimSuffix(forwardURL, "/")
 	lg.info("FORWARD_TO_URL = %s", forwardURL)
-
-	fl = newFileLogger()
-	if fl == nil {
-		lg.warn("Order log disabled (write permission denied)")
-	}
 
 	port := getEnv("RELAY_PORT", "8082")
 	addr := ":" + port
@@ -73,9 +62,6 @@ func main() {
 		<-sigChan
 		lg.info("Shutting down relay...")
 		ln.Close()
-		if fl != nil {
-			fl.close()
-		}
 		os.Exit(0)
 	}()
 
@@ -119,6 +105,7 @@ func handleConn(conn net.Conn) {
 
 		sentAt := time.Now()
 
+		// ── RECV ──────────────────────────────────────────
 		lg.received(peer, &sig)
 
 		// Forward lên HTTP server
@@ -128,13 +115,12 @@ func handleConn(conn net.Conn) {
 		if err != nil {
 			lg.error("FWD->%s FAIL %s %s %s %.2f | %v",
 				forwardURL, sig.Action, sig.Side, sig.Symbol, sig.Lot, err)
-			fl.append(sig, sentAt, peer, forwardURL, httpStatus, err.Error(), latency)
 			conn.Write([]byte(fmt.Sprintf(`{"ok":false,"error":"%v"}`+"\n", err)))
 			continue
 		}
 
+		// ── SENT ──────────────────────────────────────────
 		lg.sent(forwardURL, &sig, httpStatus, latency)
-		fl.append(sig, sentAt, peer, forwardURL, httpStatus, "", latency)
 		conn.Write(append(respBody, '\n'))
 	}
 }
@@ -209,70 +195,6 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
-// ─── File Logger ─────────────────────────────────────────────────────────
-
-func newFileLogger() *fileLogger {
-	logPath := getEnv("ORDER_LOG_PATH", "/app/logs/orders.log")
-	dir := strings.TrimSuffix(logPath, "/orders.log")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil
-	}
-
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
-	if err != nil {
-		return nil
-	}
-	return &fileLogger{file: f}
-}
-
-func (l *fileLogger) append(sig Signal, sentAt time.Time, fromIP, toURL string, httpStatus int, errMsg string, latency time.Duration) {
-	if l == nil {
-		return
-	}
-
-	ts := sentAt.Format(time.RFC3339)
-	status := fmt.Sprintf("OK:%d", httpStatus)
-	if errMsg != "" {
-		status = "ERROR:" + errMsg
-	}
-
-	line := fmt.Sprintf(
-		"%s|%s|%s|%s|%.2f|%.5f|%.5f|%.5f|%d|%.2f|%s|%s|%s|%s|%.0f|%s\n",
-		ts,
-		strings.ToUpper(sig.Action),
-		strings.ToUpper(sig.Side),
-		strings.ToUpper(sig.Symbol),
-		sig.Lot,
-		sig.Price,
-		sig.SL,
-		sig.TP,
-		sig.Magic,
-		sig.Pnl,
-		sig.Comment,
-		status,
-		fromIP,
-		toURL,
-		float64(latency.Microseconds())/1000.0,
-		"",
-	)
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.file.WriteString(line)
-	l.file.Sync()
-}
-
-func (l *fileLogger) close() {
-	if l == nil {
-		return
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if l.file != nil {
-		l.file.Close()
-	}
-}
-
 // ─── Console Logger ─────────────────────────────────────────────────────
 
 type logger struct {
@@ -294,33 +216,36 @@ func (l *logger) log(prefix, msg string) {
 func (l *logger) received(from string, s *Signal) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	fmt.Printf("[%s] \x1b[36mRECV\x1b[0m <- \x1b[90m%s\x1b[0m | %s %s %s %.2f @ %.5f | SL=%.5f TP=%.5f | magic=%d | pnl=%+.2f\n",
+
+	comment := ""
+	if s.Comment != "" {
+		comment = " | " + s.Comment
+	}
+
+	fmt.Printf(
+		"[%s] \x1b[36mRECV\x1b[0m \x1b[90mfrom %s\x1b[0m | %s %s %.2f @ %.5f | SL=%.5f TP=%.5f | magic=%d | pnl=%+.2f%s\n",
 		time.Now().Format("15:04:05"),
 		from,
 		strings.ToUpper(s.Action),
 		strings.ToUpper(s.Side),
-		"\x1b[37m"+s.Symbol+"\x1b[0m",
-		s.Lot, s.Price,
-		s.SL, s.TP,
+		s.Lot,
+		s.Price,
+		s.SL,
+		s.TP,
 		s.Magic,
 		s.Pnl,
+		comment,
 	)
 }
 
 func (l *logger) sent(to string, s *Signal, httpStatus int, latency time.Duration) {
-	action := strings.ToUpper(s.Action)
-	side := strings.ToUpper(s.Side)
-
 	var color string
-	switch action {
+	switch strings.ToUpper(s.Action) {
 	case "OPEN":
-		switch side {
-		case "BUY", "BUY_STOP", "BUY_LIMIT":
+		if strings.HasPrefix(strings.ToUpper(s.Side), "BUY") {
 			color = "\x1b[32m"
-		case "SELL", "SELL_STOP", "SELL_LIMIT":
+		} else {
 			color = "\x1b[31m"
-		default:
-			color = "\x1b[34m"
 		}
 	case "CLOSE":
 		color = "\x1b[35m"
@@ -333,13 +258,25 @@ func (l *logger) sent(to string, s *Signal, httpStatus int, latency time.Duratio
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	fmt.Printf("[%s] \x1b[36mSENT\x1b[0m -> \x1b[90m%s\x1b[0m | %s%s %s %s %.2f @ %.5f | resp=%d | %s\n",
+	comment := ""
+	if s.Comment != "" {
+		comment = " | " + s.Comment
+	}
+
+	fmt.Printf(
+		"[%s] \x1b[36mSENT\x1b[0m \x1b[90m-> %s\x1b[0m | %s%s %s %.2f @ %.5f | SL=%.5f TP=%.5f | magic=%d | pnl=%+.2f | resp=%d | %s%s\n",
 		time.Now().Format("15:04:05"),
 		to,
-		color, action, side,
-		"\x1b[37m"+s.Symbol+"\x1b[0m",
-		s.Lot, s.Price,
+		color, strings.ToUpper(s.Action),
+		strings.ToUpper(s.Side),
+		s.Lot,
+		s.Price,
+		s.SL,
+		s.TP,
+		s.Magic,
+		s.Pnl,
 		httpStatus,
 		latency.Round(time.Millisecond),
+		comment,
 	)
 }
