@@ -34,11 +34,10 @@ type Signal struct {
 }
 
 // HttpPayload là payload gửi lên FORWARD_TO_URL/signal
-// action = BUY/SELL (thứ server cần)
-// type = OPEN/CLOSE/EDIT (metadata, không gửi đi)
+// action = BUY/SELL/BUY_STOP/SELL_STOP/CLOSE/MODIFY/CLOSE_ALL (thứ server cần)
+// type field KHÔNG được gửi — server không hỗ trợ
 type HttpPayload struct {
-	Action  string  `json:"action"`  // BUY/SELL
-	Type    string  `json:"type"`    // OPEN/CLOSE/EDIT
+	Action  string  `json:"action"`
 	Symbol  string  `json:"symbol"`
 	Lot     float64 `json:"lot"`
 	Price   float64 `json:"price"`
@@ -49,10 +48,26 @@ type HttpPayload struct {
 	Comment string  `json:"comment"`
 }
 
+// effectiveAction derives the action string the server expects:
+// - OPEN + BUY  → BUY  (market, price=0) or BUY + price (limit)
+// - OPEN + SELL → SELL (market, price=0) or SELL + price (limit)
+// - CLOSE       → CLOSE
+// - EDIT        → MODIFY
+func effectiveAction(s *Signal) string {
+	switch s.Action {
+	case "CLOSE":
+		return "CLOSE"
+	case "EDIT":
+		return "MODIFY"
+	case "OPEN":
+		return s.Side
+	}
+	return ""
+}
+
 func signalToHttpPayload(s *Signal) *HttpPayload {
 	return &HttpPayload{
-		Action:  s.Side,    // BUY/SELL — thứ server cần
-		Type:    s.Action,  // OPEN/CLOSE/EDIT — metadata
+		Action:  effectiveAction(s),
 		Symbol:  s.Symbol,
 		Lot:     s.Lot,
 		Price:   s.Price,
@@ -141,7 +156,7 @@ func handleConn(conn net.Conn) {
 		// ── RECV ──────────────────────────────────────────
 		lg.received(peer, &sig)
 
-		// Build payload: action=BUY/SELL, type=OPEN/CLOSE/EDIT
+		// Build payload: action=BUY/SELL/MODIFY/CLOSE (no Type field)
 		payload := signalToHttpPayload(&sig)
 
 		// Forward lên HTTP server
@@ -150,7 +165,7 @@ func handleConn(conn net.Conn) {
 
 		if err != nil {
 			lg.error("FWD->%s FAIL %s %s %s %.2f | %v",
-				forwardURL, payload.Type, payload.Action, payload.Symbol, payload.Lot, err)
+				forwardURL, sig.Action, payload.Action, payload.Symbol, payload.Lot, err)
 			conn.Write([]byte(fmt.Sprintf(`{"ok":false,"error":"%v"}`+"\n", err)))
 			continue
 		}
@@ -276,16 +291,14 @@ func (l *logger) received(from string, s *Signal) {
 
 func (l *logger) sent(to string, p *HttpPayload, httpStatus int, latency time.Duration) {
 	var color string
-	switch strings.ToUpper(p.Type) {
-	case "OPEN":
-		if strings.HasPrefix(strings.ToUpper(p.Action), "BUY") {
-			color = "\x1b[32m"
-		} else {
-			color = "\x1b[31m"
-		}
-	case "CLOSE":
+	switch strings.ToUpper(p.Action) {
+	case "BUY", "BUY_STOP":
+		color = "\x1b[32m"
+	case "SELL", "SELL_STOP":
+		color = "\x1b[31m"
+	case "CLOSE", "CLOSE_ALL":
 		color = "\x1b[35m"
-	case "EDIT":
+	case "MODIFY":
 		color = "\x1b[33m"
 	default:
 		color = "\x1b[34m"
@@ -303,8 +316,8 @@ func (l *logger) sent(to string, p *HttpPayload, httpStatus int, latency time.Du
 		"[%s] \x1b[36mSENT\x1b[0m \x1b[90m-> %s\x1b[0m | %s%s %s %.2f @ %.5f | SL=%.5f TP=%.5f | magic=%d | pnl=%+.2f | resp=%d | %s%s\n",
 		time.Now().Format("15:04:05"),
 		to,
-		color, strings.ToUpper(p.Type),
-		strings.ToUpper(p.Action),
+		color, strings.ToUpper(p.Action),
+		p.Symbol,
 		p.Lot,
 		p.Price,
 		p.SL,
