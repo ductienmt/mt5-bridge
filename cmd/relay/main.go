@@ -1,5 +1,5 @@
 // Relay: nhận signal qua TCP rồi forward lên server HTTP khác
-// MT5 EA → TCP Bridge → Relay → http://103.72.56.53:8080
+// TCP Bridge → Relay :1082 → http://103.72.56.53:8080
 package main
 
 import (
@@ -65,7 +65,7 @@ func main() {
 		lg.error("Bind failed on %s: %v", addr, err)
 		os.Exit(1)
 	}
-	lg.info("Relay listening on %s -> %s", addr, forwardURL)
+	lg.info("Relay listening on %s -> %s/signal", addr, forwardURL)
 
 	go func() {
 		sigChan := make(chan os.Signal, 1)
@@ -95,6 +95,8 @@ func main() {
 func handleConn(conn net.Conn) {
 	defer conn.Close()
 
+	peer := conn.RemoteAddr().String()
+
 	scanner := bufio.NewScanner(conn)
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 1024*1024)
@@ -117,18 +119,22 @@ func handleConn(conn net.Conn) {
 
 		sentAt := time.Now()
 
+		lg.received(peer, &sig)
+
+		// Forward lên HTTP server
 		respBody, httpStatus, err := forwardSignal(sig)
 		latency := time.Since(sentAt)
 
 		if err != nil {
-			lg.error("forward error: %v", err)
-			fl.append(sig, sentAt, "", httpStatus, err.Error(), latency)
+			lg.error("FWD->%s FAIL %s %s %s %.2f | %v",
+				forwardURL, sig.Action, sig.Side, sig.Symbol, sig.Lot, err)
+			fl.append(sig, sentAt, peer, forwardURL, httpStatus, err.Error(), latency)
 			conn.Write([]byte(fmt.Sprintf(`{"ok":false,"error":"%v"}`+"\n", err)))
 			continue
 		}
 
-		lg.order(&sig, httpStatus, latency)
-		fl.append(sig, sentAt, string(respBody), httpStatus, "", latency)
+		lg.sent(forwardURL, &sig, httpStatus, latency)
+		fl.append(sig, sentAt, peer, forwardURL, httpStatus, "", latency)
 		conn.Write(append(respBody, '\n'))
 	}
 }
@@ -219,7 +225,7 @@ func newFileLogger() *fileLogger {
 	return &fileLogger{file: f}
 }
 
-func (l *fileLogger) append(sig Signal, sentAt time.Time, respBody string, httpStatus int, errMsg string, latency time.Duration) {
+func (l *fileLogger) append(sig Signal, sentAt time.Time, fromIP, toURL string, httpStatus int, errMsg string, latency time.Duration) {
 	if l == nil {
 		return
 	}
@@ -231,7 +237,7 @@ func (l *fileLogger) append(sig Signal, sentAt time.Time, respBody string, httpS
 	}
 
 	line := fmt.Sprintf(
-		"%s|%s|%s|%s|%.2f|%.5f|%.5f|%.5f|%d|%.2f|%s|%s|%.0f|%s\n",
+		"%s|%s|%s|%s|%.2f|%.5f|%.5f|%.5f|%d|%.2f|%s|%s|%s|%s|%.0f|%s\n",
 		ts,
 		strings.ToUpper(sig.Action),
 		strings.ToUpper(sig.Side),
@@ -244,8 +250,10 @@ func (l *fileLogger) append(sig Signal, sentAt time.Time, respBody string, httpS
 		sig.Pnl,
 		sig.Comment,
 		status,
+		fromIP,
+		toURL,
 		float64(latency.Microseconds())/1000.0,
-		strings.TrimSpace(respBody),
+		"",
 	)
 
 	l.mu.Lock()
@@ -283,7 +291,23 @@ func (l *logger) log(prefix, msg string) {
 	fmt.Printf("[%s] %s %s\n", time.Now().Format("2006-01-02 15:04:05"), prefix, msg)
 }
 
-func (l *logger) order(s *Signal, httpStatus int, latency time.Duration) {
+func (l *logger) received(from string, s *Signal) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	fmt.Printf("[%s] \x1b[36mRECV\x1b[0m <- \x1b[90m%s\x1b[0m | %s %s %s %.2f @ %.5f | SL=%.5f TP=%.5f | magic=%d | pnl=%+.2f\n",
+		time.Now().Format("15:04:05"),
+		from,
+		strings.ToUpper(s.Action),
+		strings.ToUpper(s.Side),
+		"\x1b[37m"+s.Symbol+"\x1b[0m",
+		s.Lot, s.Price,
+		s.SL, s.TP,
+		s.Magic,
+		s.Pnl,
+	)
+}
+
+func (l *logger) sent(to string, s *Signal, httpStatus int, latency time.Duration) {
 	action := strings.ToUpper(s.Action)
 	side := strings.ToUpper(s.Side)
 
@@ -309,16 +333,12 @@ func (l *logger) order(s *Signal, httpStatus int, latency time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	fmt.Fprintf(os.Stdout,
-		"[%s] %sORDER\x1b[0m %s%-6s %s\x1b[0m lot=%.2f @ %.5f | SL=%.5f TP=%.5f | magic=%d | pnl=%+.2f | resp=%d | %s\n",
+	fmt.Printf("[%s] \x1b[36mSENT\x1b[0m -> \x1b[90m%s\x1b[0m | %s%s %s %s %.2f @ %.5f | resp=%d | %s\n",
 		time.Now().Format("15:04:05"),
-		color,
-		action, side,
+		to,
+		color, action, side,
 		"\x1b[37m"+s.Symbol+"\x1b[0m",
 		s.Lot, s.Price,
-		s.SL, s.TP,
-		s.Magic,
-		s.Pnl,
 		httpStatus,
 		latency.Round(time.Millisecond),
 	)

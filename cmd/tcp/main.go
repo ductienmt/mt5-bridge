@@ -1,5 +1,5 @@
-// TCP bridge: Go server nhận lệnh qua TCP rồi đẩy vào queue
-// → MT5 EA TradingBridgeSocketEA đọc qua DLL
+// TCP bridge: nhận lệnh từ MT5 EA qua TCP,
+// push vào queue (cho DLL đọc) + forward sang relay (để forward đi server khác)
 package main
 
 import (
@@ -18,8 +18,14 @@ import (
 	sigpkg "mt5-bridge/signal"
 )
 
-var q  = sigpkg.Get()
-var lg = sigpkg.NewLogger()
+var (
+	q          = sigpkg.Get()
+	lg         = sigpkg.NewLogger()
+	relayConn  net.Conn
+	relayMu    sync.Mutex
+	relayHost  string
+	relayClose = make(chan struct{})
+)
 
 type Client struct {
 	conn net.Conn
@@ -35,6 +41,12 @@ var (
 func main() {
 	sigpkg.Banner()
 
+	relayHost = os.Getenv("RELAY_HOST")
+	if relayHost != "" {
+		lg.Info("RELAY_HOST set: %s — sẽ forward signal sang relay", relayHost)
+		go keepRelayConnection()
+	}
+
 	port := getEnv("MT5_TCP_PORT", "8081")
 	addr := ":" + port
 
@@ -45,13 +57,17 @@ func main() {
 	}
 
 	lg.Info("TCP bridge listening on %s", addr)
-	lg.Info("Waiting for clients (TradingBridgeSocketEA)...")
+	lg.Info("Queue backend ready (DLL đọc từ đây)")
 
 	go func() {
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 		<-sigChan
 		lg.Info("Shutting down TCP bridge...")
+		close(relayClose)
+		if relayConn != nil {
+			relayConn.Close()
+		}
 		ln.Close()
 		clientsMu.Lock()
 		for c := range clients {
@@ -84,6 +100,93 @@ func main() {
 	lg.Info("Server stopped")
 }
 
+// keepRelayConnection giữ kết nối TCP tới relay, tự reconnect nếu rớt.
+func keepRelayConnection() {
+	for {
+		select {
+		case <-relayClose:
+			return
+		default:
+		}
+
+		conn, err := net.DialTimeout("tcp", relayHost, 5*time.Second)
+		if err != nil {
+			lg.Warn("Cannot connect to relay %s: %v — retry in 5s", relayHost, err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		relayMu.Lock()
+		relayConn = conn
+		relayMu.Unlock()
+
+		lg.Info("Connected to relay %s", relayHost)
+
+		// Đọc response từ relay (relay sẽ gửi ack sau mỗi forward)
+		go func() {
+			buf := make([]byte, 4096)
+			for {
+				if relayConn == nil {
+					break
+				}
+				relayConn.SetReadDeadline(time.Now().Add(30 * time.Second))
+				n, err := relayConn.Read(buf)
+				if err != nil {
+					if !strings.Contains(err.Error(), "timeout") {
+						lg.Warn("Relay connection closed: %v", err)
+					}
+					break
+				}
+				lg.Info("Relay ack: %s", string(buf[:n]))
+			}
+
+			relayMu.Lock()
+			if relayConn != nil {
+				relayConn.Close()
+				relayConn = nil
+			}
+			relayMu.Unlock()
+		}()
+
+		// Chờ bị đóng hoặc rớt
+		<-relayClose
+		return
+	}
+}
+
+// sendToRelay forward signal sang relay qua TCP connection đang có.
+func sendToRelay(line []byte) {
+	relayMu.Lock()
+	conn := relayConn
+	relayMu.Unlock()
+
+	if conn == nil {
+		lg.Warn("No relay connection — signal not forwarded")
+		return
+	}
+
+	// Gửi theo đúng protocol: [4 bytes length][JSON]
+	data := append(line, '\n')
+	length := uint32(len(data))
+	prefix := []byte{
+		byte(length >> 24),
+		byte(length >> 16),
+		byte(length >> 8),
+		byte(length),
+	}
+
+	_, err := conn.Write(append(prefix, data...))
+	if err != nil {
+		lg.Error("Failed to forward to relay: %v", err)
+		relayMu.Lock()
+		if relayConn != nil {
+			relayConn.Close()
+			relayConn = nil
+		}
+		relayMu.Unlock()
+	}
+}
+
 func handleConn(conn net.Conn) {
 	defer func() {
 		clientsMu.Lock()
@@ -97,12 +200,7 @@ func handleConn(conn net.Conn) {
 	clients[conn] = &Client{conn: conn, addr: addr, seen: time.Now()}
 	clientsMu.Unlock()
 
-	lg.Info("Client connected: %s", addr)
-	lg.Info("Active connections: %d", func() int {
-		clientsMu.RLock()
-		defer clientsMu.RUnlock()
-		return len(clients)
-	}())
+	lg.Info("MT5 EA connected: %s", addr)
 
 	scanner := bufio.NewScanner(conn)
 	buf := make([]byte, 0, 64*1024)
@@ -130,8 +228,14 @@ func handleConn(conn net.Conn) {
 				lg.Warn("Invalid message from %s: %s", addr, raw)
 				continue
 			}
+			// Push vào queue cho DLL
 			q.Push(sig)
-			lg.Order(&sig)
+			lg.Info("RECV from MT5 | %s %s %s %.2f @ %.5f | QUEUE", sig.Action, sig.Side, sig.Symbol, sig.Lot, sig.Price)
+			// Forward sang relay nếu có
+			if relayHost != "" {
+				sendToRelay(line)
+				lg.Info("SENT to relay %s | %s %s %s %.2f @ %.5f", relayHost, sig.Action, sig.Side, sig.Symbol, sig.Lot, sig.Price)
+			}
 			continue
 		}
 
@@ -141,8 +245,15 @@ func handleConn(conn net.Conn) {
 			continue
 		}
 
+		// Push vào queue cho DLL
 		q.Push(sig)
-		lg.Order(&sig)
+		lg.Info("RECV from MT5 | %s %s %s %.2f @ %.5f | QUEUE", sig.Action, sig.Side, sig.Symbol, sig.Lot, sig.Price)
+
+		// Forward sang relay nếu có
+		if relayHost != "" {
+			sendToRelay(line)
+			lg.Info("SENT to relay %s | %s %s %s %.2f @ %.5f", relayHost, sig.Action, sig.Side, sig.Symbol, sig.Lot, sig.Price)
+		}
 
 		ack := map[string]any{
 			"status": "queued",
@@ -160,7 +271,7 @@ func handleConn(conn net.Conn) {
 		}
 	}
 
-	lg.Info("Client disconnected: %s", addr)
+	lg.Info("MT5 EA disconnected: %s", addr)
 }
 
 func parsePipe(raw string) (sigpkg.Signal, bool) {

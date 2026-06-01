@@ -32,6 +32,7 @@ services:
       - "${MT5_TCP_PORT:-1081}:8081"
     environment:
       - MT5_TCP_PORT=8081
+      - RELAY_HOST=relay:8082
       - BINARY=tcp-bridge
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "8081"]
