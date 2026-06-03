@@ -177,6 +177,9 @@ func sendToServer(line []byte) error {
 
 		lg.info("Connected to server %s", addr)
 
+		// Đọc response từ server trong goroutine riêng (tránh buffer đầy)
+		go readServerResponses(newConn)
+
 		// Gửi ngay với connection mới
 		data := append(line, '\n')
 		_, err = newConn.Write(data)
@@ -196,6 +199,19 @@ func sendToServer(line []byte) error {
 	}
 
 	return fmt.Errorf("failed after 3 attempts")
+}
+
+// readServerResponses đọc response từ server trong goroutine riêng
+// để tránh buffer đầy và phát hiện server đóng connection
+func readServerResponses(conn net.Conn) {
+	defer conn.Close()
+
+	scanner := bufio.NewScanner(conn)
+	for scanner.Scan() {
+		// Đọc và bỏ qua response
+		// Có thể log nếu cần debug
+	}
+	// Khi scanner kết thúc, connection đã bị đóng
 }
 
 func handleConn(conn net.Conn) {
