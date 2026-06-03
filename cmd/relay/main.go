@@ -91,9 +91,6 @@ func main() {
 	}
 	lg.info("FORWARD_TO = %s:%s", forwardHost, forwardPort)
 
-	// Start TCP connection to forward server
-	go keepServerConnection()
-
 	port := getEnv("RELAY_PORT", "8082")
 	addr := ":" + port
 
@@ -130,115 +127,39 @@ func main() {
 	}
 }
 
-// keepServerConnection giữ kết nối TCP tới server, tự reconnect nếu rớt.
-func keepServerConnection() {
-	pingInterval := 30 * time.Second // Ping mỗi 30s để giữ connection alive
-	addr := fmt.Sprintf("%s:%s", forwardHost, forwardPort)
-
-	for {
-		select {
-		case <-serverClose:
-			return
-		case <-reconnectServer:
-			// Reconnect được trigger từ sendToServer khi connection bị đóng
-		default:
-		}
-
-		conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
-		if err != nil {
-			lg.warn("Cannot connect to server %s: %v — retry in 5s", addr, err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		// Tắt Nagle's Algorithm để gói tin được gửi ngay lập tức
-		if tcpConn, ok := conn.(*net.TCPConn); ok {
-			tcpConn.SetNoDelay(true)
-		}
-
-		serverMu.Lock()
-		serverConn = conn
-		serverMu.Unlock()
-
-		lg.info("Connected to server %s", addr)
-
-		// Giữ connection alive bằng ping định kỳ
-		pingTicker := time.NewTicker(pingInterval)
-		defer pingTicker.Stop()
-
-		for {
-			select {
-			case <-serverClose:
-				conn.Close()
-				return
-			case <-reconnectServer:
-				conn.Close()
-				goto reconnectLoop
-			case <-pingTicker.C:
-				// Gửi ping nhẹ để giữ connection alive
-				serverMu.Lock()
-				currentConn := serverConn
-				serverMu.Unlock()
-
-				if currentConn != conn {
-					conn.Close()
-					goto reconnectLoop
-				}
-
-				// Thử write một byte null để check connection
-				conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
-				_, err := conn.Write([]byte{})
-				if err != nil {
-					lg.warn("Server connection lost (keep-alive): %v", err)
-					conn.Close()
-					goto reconnectLoop
-				}
-			}
-		}
-	reconnectLoop:
-	}
-}
-
-// reconnectServer dùng để notify cho keepServerConnection biết cần reconnect
-var reconnectServer = make(chan struct{}, 1)
-
 // sendToServer forward signal sang server.
-// Nếu chưa có connection hoặc connection bị đóng, dial mới ngay lập tức.
+// Tự động dial mới nếu chưa có connection hoặc connection bị đóng.
+// Quản lý connection hoàn toàn trong hàm này để tránh race condition.
 func sendToServer(line []byte) error {
 	addr := fmt.Sprintf("%s:%s", forwardHost, forwardPort)
 
-	// Thử gửi với connection hiện tại
 	for attempt := 0; attempt < 3; attempt++ {
+		// Lấy connection hiện tại
 		serverMu.Lock()
 		conn := serverConn
 		serverMu.Unlock()
 
 		if conn != nil {
-			// Gửi plain JSON newline-delimited
+			// Thử gửi với connection hiện tại
 			data := append(line, '\n')
 			_, err := conn.Write(data)
 			if err != nil {
-				// Connection bị đóng, trigger reconnect và dial mới
+				// Connection bị đóng, đóng và xóa
 				serverMu.Lock()
 				if serverConn != nil {
 					serverConn.Close()
 					serverConn = nil
 				}
 				serverMu.Unlock()
-
-				// Signal cho keepServerConnection biết cần reconnect
-				select {
-				case reconnectServer <- struct{}{}:
-				default:
-				}
+				lg.warn("Connection lost, reconnecting...")
 			} else {
 				// Thành công!
 				return nil
 			}
 		}
 
-		// Chưa có connection, dial mới ngay
-		conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+		// Dial connection mới
+		newConn, err := net.DialTimeout("tcp", addr, 3*time.Second)
 		if err != nil {
 			lg.warn("Dial failed: %v — retry in 500ms", err)
 			time.Sleep(500 * time.Millisecond)
@@ -246,31 +167,27 @@ func sendToServer(line []byte) error {
 		}
 
 		// Tắt Nagle's Algorithm
-		if tcpConn, ok := conn.(*net.TCPConn); ok {
+		if tcpConn, ok := newConn.(*net.TCPConn); ok {
 			tcpConn.SetNoDelay(true)
 		}
 
 		serverMu.Lock()
-		serverConn = conn
+		serverConn = newConn
 		serverMu.Unlock()
 
-		lg.info("Connected to server %s (send)", addr)
+		lg.info("Connected to server %s", addr)
 
-		// Thử gửi ngay với connection mới
+		// Gửi ngay với connection mới
 		data := append(line, '\n')
-		_, err = conn.Write(data)
+		_, err = newConn.Write(data)
 		if err != nil {
+			// Gửi thất bại, đóng và retry
 			serverMu.Lock()
 			if serverConn != nil {
 				serverConn.Close()
 				serverConn = nil
 			}
 			serverMu.Unlock()
-
-			select {
-			case reconnectServer <- struct{}{}:
-			default:
-			}
 			time.Sleep(500 * time.Millisecond)
 			continue
 		}
