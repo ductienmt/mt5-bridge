@@ -43,7 +43,7 @@ services:
     image: rediscommander/redis-commander:latest
     container_name: mt5-redis-commander
     ports:
-      - "${REDIS_COMMANDER_PORT:-8081}:8081"
+      - "${REDIS_COMMANDER_PORT:-18081}:8081"
     environment:
       REDIS_HOSTS: local:mt5-redis:6379:0:${REDIS_PASSWORD:-admin123}
     networks:
