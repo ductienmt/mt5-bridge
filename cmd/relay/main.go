@@ -241,11 +241,12 @@ func handleConn(conn net.Conn) {
 		// ── RECV ──────────────────────────────────────────
 		lg.received(peer, &sig)
 
-		// Build payload for TCP
+		// Build payload for TCP: chuyển action=OPEN/side=BUY thành action=BUY
 		payload := signalToTcpPayload(&sig)
+		payloadBytes, _ := json.Marshal(payload)
 
 		// Forward tới server TCP
-		err := sendToServer(line)
+		err := sendToServer(payloadBytes)
 		latency := time.Since(sentAt)
 
 		if err != nil {
