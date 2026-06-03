@@ -199,6 +199,11 @@ func keepRelayConnection() {
 			continue
 		}
 
+		// Tắt Nagle's Algorithm để gói tin được gửi ngay lập tức
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			tcpConn.SetNoDelay(true)
+		}
+
 		relayMu.Lock()
 		relayConn = conn
 		relayMu.Unlock()
@@ -337,7 +342,7 @@ func handleConn(conn net.Conn) {
 				lg.Warn("Invalid message from %s: %s", addr, raw)
 				continue
 			}
-			processSignal(addr, sig, line)
+			processSignal(conn, addr, sig, line)
 			continue
 		}
 
@@ -347,7 +352,7 @@ func handleConn(conn net.Conn) {
 			continue
 		}
 
-		processSignal(addr, sig, line)
+		processSignal(conn, addr, sig, line)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -360,30 +365,16 @@ func handleConn(conn net.Conn) {
 }
 
 // processSignal handles a parsed signal - push to queue and check for master-follower
-func processSignal(addr string, sig sigpkg.Signal, rawLine []byte) {
+// Được tối ưu để:
+// 1. Gửi ACK ngay lập tức (không cần lookup connection)
+// 2. Forward sang relay bất đồng bộ (goroutine riêng)
+// 3. Xử lý master-follower bất đồng bộ (không block hot path)
+func processSignal(conn net.Conn, addr string, sig sigpkg.Signal, rawLine []byte) {
 	// Push to queue for local processing
 	q.Push(sig)
 	tcpLog("RECV", addr, &sig)
 
-	// Check if this is a master signal
-	if sig.AccountID != "" {
-		masterID, isMaster := isMasterSignal(sig.AccountID)
-		if isMaster {
-			// Record received signal
-			metrics.SignalsReceived.WithLabelValues(masterID).Inc()
-
-			// Distribute to followers
-			distributeToFollowers(masterID, sig)
-		}
-	}
-
-	// Forward to relay if configured
-	if relayHost != "" {
-		sendToRelay(rawLine)
-		tcpLog("FWD ", addr, &sig)
-	}
-
-	// Send ACK back
+	// Gửi ACK ngay lập tức - không cần lookup connection nữa
 	ack := map[string]any{
 		"status": "queued",
 		"queue":  q.Size(),
@@ -391,9 +382,27 @@ func processSignal(addr string, sig sigpkg.Signal, rawLine []byte) {
 		"time":   time.Now().Format(time.RFC3339),
 	}
 	ackBytes, _ := json.Marshal(ack)
-	conn, _ := getConnByAddr(addr)
 	if conn != nil {
 		conn.Write(append(ackBytes, '\n'))
+	}
+
+	// 1. Forward sang relay BẤT ĐỒNG BỘ - không block hot path
+	if relayHost != "" {
+		go func(data []byte) {
+			sendToRelay(data)
+			tcpLog("FWD ", addr, &sig)
+		}(rawLine)
+	}
+
+	// 2. Xử lý Master-Follower BẤT ĐỒNG BỘ - Redis/DB I/O không block forward
+	if sig.AccountID != "" {
+		go func(s sigpkg.Signal) {
+			masterID, isMaster := isMasterSignal(s.AccountID)
+			if isMaster {
+				metrics.SignalsReceived.WithLabelValues(masterID).Inc()
+				distributeToFollowers(masterID, s)
+			}
+		}(sig)
 	}
 }
 

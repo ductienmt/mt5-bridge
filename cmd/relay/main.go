@@ -80,7 +80,6 @@ var (
 	serverConn    net.Conn
 	serverMu      sync.Mutex
 	serverClose   = make(chan struct{})
-	serverReady   = make(chan struct{})
 )
 
 func main() {
@@ -137,6 +136,8 @@ func keepServerConnection() {
 		select {
 		case <-serverClose:
 			return
+		case <-reconnectServer:
+			// Reconnect được trigger từ sendToServer khi connection bị đóng
 		default:
 		}
 
@@ -148,67 +149,68 @@ func keepServerConnection() {
 			continue
 		}
 
+		// Tắt Nagle's Algorithm để gói tin được gửi ngay lập tức
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			tcpConn.SetNoDelay(true)
+		}
+
 		serverMu.Lock()
 		serverConn = conn
 		serverMu.Unlock()
 
 		lg.info("Connected to server %s", addr)
 
-		// Signal ready
-		select {
-		case serverReady <- struct{}{}:
-		default:
-		}
-
-		// Đọc dữ liệu từ connection để detect disconnect
-		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-		buf := make([]byte, 1)
-		_, err = conn.Read(buf)
-		if err != nil {
-			serverMu.Lock()
-			if serverConn == conn {
-				serverConn.Close()
-				serverConn = nil
-			}
-			serverMu.Unlock()
-			lg.warn("Server connection lost: %v — reconnecting...", err)
-			time.Sleep(1 * time.Second)
-			continue
-		}
+		// Connection thành công, đợi cho đến khi bị đóng
+		<-serverClose
+		return
 	}
 }
 
+// reconnectServer dùng để notify cho keepServerConnection biết cần reconnect
+var reconnectServer = make(chan struct{}, 1)
+
 // sendToServer forward signal sang server qua TCP connection đang có.
+// Nếu chưa có connection, đợi cho đến khi có.
+// Nếu connection bị đóng, trigger reconnect.
 func sendToServer(line []byte) error {
-	// Đợi connection sẵn sàng
-	select {
-	case <-serverReady:
-	case <-time.After(30 * time.Second):
-		return fmt.Errorf("timeout waiting for server connection")
-	}
-
-	serverMu.Lock()
-	conn := serverConn
-	serverMu.Unlock()
-
-	if conn == nil {
-		return fmt.Errorf("no server connection")
-	}
-
-	// Gửi plain JSON newline-delimited
-	data := append(line, '\n')
-	_, err := conn.Write(data)
-	if err != nil {
+	// Đợi connection sẵn sàng (tối đa 30 giây)
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
 		serverMu.Lock()
-		if serverConn != nil {
-			serverConn.Close()
-			serverConn = nil
-		}
+		conn := serverConn
 		serverMu.Unlock()
-		return err
+
+		if conn != nil {
+			// Gửi plain JSON newline-delimited
+			data := append(line, '\n')
+			_, err := conn.Write(data)
+			if err != nil {
+				// Connection bị đóng, trigger reconnect
+				serverMu.Lock()
+				if serverConn != nil {
+					serverConn.Close()
+					serverConn = nil
+				}
+				serverMu.Unlock()
+				
+				// Trigger reconnect
+				select {
+				case reconnectServer <- struct{}{}:
+				default:
+				}
+				
+				// Đợi một chút rồi thử lại
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			return nil
+		}
+
+		// Chưa có connection, đợi 100ms rồi thử lại
+		time.Sleep(100 * time.Millisecond)
 	}
 
-	return nil
+	return fmt.Errorf("timeout waiting for server connection")
 }
 
 func handleConn(conn net.Conn) {
