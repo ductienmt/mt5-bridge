@@ -9,15 +9,16 @@ import (
 )
 
 type RawSignal struct {
-	Action  string `json:"action"`
-	Side   string `json:"side"`
-	Symbol string `json:"symbol"`
-	Lot    any    `json:"lot"`
-	SL     any    `json:"sl"`
-	TP     any    `json:"tp"`
-	Price  any    `json:"price"`
-	Magic  any    `json:"magic"`
-	Pnl    any    `json:"pnl"`
+	AccountID string `json:"accountId"`
+	Action   string `json:"action"`
+	Side    string `json:"side"`
+	Symbol  string `json:"symbol"`
+	Lot     any    `json:"lot"`
+	SL      any    `json:"sl"`
+	TP      any    `json:"tp"`
+	Price   any    `json:"price"`
+	Magic   any    `json:"magic"`
+	Pnl     any    `json:"pnl"`
 	Comment string `json:"comment"`
 }
 
@@ -28,9 +29,10 @@ func ParseSignal(data []byte) (Signal, error) {
 	}
 
 	s := Signal{
-		Action:  strings.ToUpper(strings.TrimSpace(raw.Action)),
-		Side:   strings.ToUpper(strings.TrimSpace(raw.Side)),
-		Symbol: strings.ToUpper(strings.TrimSpace(raw.Symbol)),
+		AccountID: strings.TrimSpace(raw.AccountID),
+		Action:   strings.ToUpper(strings.TrimSpace(raw.Action)),
+		Side:    strings.ToUpper(strings.TrimSpace(raw.Side)),
+		Symbol:  strings.ToUpper(strings.TrimSpace(raw.Symbol)),
 		Comment: strings.TrimSpace(raw.Comment),
 		Time:    time.Now(),
 	}

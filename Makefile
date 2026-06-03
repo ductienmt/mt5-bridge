@@ -1,4 +1,4 @@
-.PHONY: all build build-cli run-http run-tcp run-signal-cli run-sender up down clean test lint fmt
+.PHONY: all build build-cli run-http run-tcp run-api run-sender up down clean test lint fmt
 
 # Default target
 all: build
@@ -9,7 +9,8 @@ build:
 	CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/http-bridge    ./cmd/http
 	CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/tcp-bridge    ./cmd/tcp
 	CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/sender        ./cmd/sender
-	CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/relay        ./cmd/relay
+	CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/relay         ./cmd/relay
+	CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/api           ./cmd/api
 	@echo "Done → bin/"
 
 build-cli:
@@ -22,6 +23,9 @@ run-http:
 
 run-tcp:
 	go run ./cmd/tcp
+
+run-api:
+	go run ./cmd/api
 
 run-sender:
 	go run ./cmd/sender -action OPEN -side BUY -symbol EURUSD -lot 0.1 -sl 1.0800 -tp 1.0900

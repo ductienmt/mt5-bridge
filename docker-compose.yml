@@ -20,7 +20,7 @@ services:
     restart: unless-stopped
     networks:
       - mt5-net
-      - dokploy-network
+      # - dokploy-network
 
   # TCP Bridge — cho TradingBridgeSocketEA (DLL Socket mode)
   tcp-bridge:
@@ -34,6 +34,10 @@ services:
       - MT5_TCP_PORT=8081
       - RELAY_HOST=relay:8082
       - BINARY=tcp-bridge
+      - DATABASE_URL=postgres://admin:admin123@postgres:5432/mt5_bridge?sslmode=disable
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=admin123
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "8081"]
       interval: 30s
@@ -44,7 +48,7 @@ services:
     networks:
       - mt5-net
 
-  # Relay — nhận signal từ TCP bridge rồi forward lên server HTTP khác
+  # Relay — nhận signal từ TCP bridge rồi forward lên server TCP khác
   # Ví dụ: forward sang server copy-trade 103.72.56.53:8080
   relay:
     build:
@@ -55,7 +59,8 @@ services:
       - "${RELAY_PORT:-1082}:8082"
     environment:
       - RELAY_PORT=8082
-      - FORWARD_TO_URL=${FORWARD_TO_URL:-}
+      - FORWARD_TO_HOST=${FORWARD_TO_HOST:-}
+      - FORWARD_TO_PORT=${FORWARD_TO_PORT:-}
       - BINARY=relay
     volumes:
       - ./logs:/app/logs:rw
@@ -69,9 +74,35 @@ services:
     networks:
       - mt5-net
 
+  # API Server — Master-Follower management API
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mt5-api
+    ports:
+      - "${API_PORT:-1083}:8083"
+    environment:
+      - API_PORT=8083
+      - BINARY=api
+      - DATABASE_URL=postgres://admin:admin123@postgres:5432/mt5_bridge?sslmode=disable
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=admin123
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8083/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    networks:
+      - mt5-net
+
 
 networks:
   mt5-net:
+    name: mt5-net
     driver: bridge
-  dokploy-network:
-    external: true
+  # dokploy-network:
+  #   external: true

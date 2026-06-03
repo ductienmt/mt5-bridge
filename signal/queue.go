@@ -7,6 +7,7 @@ import (
 )
 
 type Signal struct {
+	AccountID string
 	Action string
 	Side   string
 	Symbol string

@@ -1,9 +1,12 @@
 // TCP bridge: nhận lệnh từ MT5 EA qua TCP,
 // push vào queue (cho DLL đọc) + forward sang relay (để forward đi server khác)
+// + distribute signals từ master accounts tới followers
 package main
 
 import (
 	"bufio"
+	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -14,22 +17,34 @@ import (
 	"syscall"
 	"time"
 
+	"mt5-bridge/internal/cache"
+	"mt5-bridge/internal/distributor"
+	"mt5-bridge/internal/metrics"
+	redisclient "mt5-bridge/internal/redis"
+	"mt5-bridge/internal/repository"
 	sigpkg "mt5-bridge/signal"
 )
 
 var (
-	q          = sigpkg.Get()
-	lg         = sigpkg.NewLogger()
-	relayConn  net.Conn
-	relayMu    sync.Mutex
-	relayHost  string
-	relayClose = make(chan struct{})
+	q              = sigpkg.Get()
+	lg             = sigpkg.NewLogger()
+	relayConn      net.Conn
+	relayMu        sync.Mutex
+	relayHost      string
+	relayClose     = make(chan struct{})
+
+	// Master-follower components
+	masterCache      *cache.MasterCache
+	subStore         *redisclient.SubscriptionStore
+	followerRepo     *repository.FollowerRepository
+	signalDistributor *distributor.SignalDistributor
 )
 
 type Client struct {
-	conn net.Conn
-	addr string
-	seen time.Time
+	conn     net.Conn
+	addr     string
+	seen     time.Time
+	accountID string // MT5 account ID of the client
 }
 
 var (
@@ -39,6 +54,9 @@ var (
 
 func main() {
 	sigpkg.Banner()
+
+	// Initialize master-follower components
+	initMasterFollower()
 
 	relayHost = os.Getenv("RELAY_HOST")
 	if relayHost != "" {
@@ -57,6 +75,7 @@ func main() {
 
 	lg.Info("TCP bridge listening on %s", addr)
 	lg.Info("Queue backend ready (DLL đọc từ đây)")
+	lg.Info("Master-Follower system initialized: %d masters in cache", masterCache.Count())
 
 	go func() {
 		sigChan := make(chan os.Signal, 1)
@@ -97,6 +116,71 @@ func main() {
 
 	wg.Wait()
 	lg.Info("Server stopped")
+}
+
+// initMasterFollower initializes the master-follower components
+func initMasterFollower() {
+	// Initialize master cache
+	masterCache = cache.Get()
+
+	// Connect to Redis
+	redisClient := redisclient.ConnectWithRetry()
+	lg.Info("Connected to Redis for master-follower subscriptions")
+
+	subStore = redisclient.NewSubscriptionStore(redisClient)
+
+	// Connect to database
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://admin:admin123@localhost:1090/mt5_bridge"
+	}
+
+	db, err := sql.Open("postgres", dbURL)
+	if err != nil {
+		lg.Warn("Failed to open database: %v — master-follower disabled", err)
+		return
+	}
+	if err := db.Ping(); err != nil {
+		lg.Warn("Failed to ping database: %v — master-follower disabled", err)
+		db.Close()
+		return
+	}
+	lg.Info("Connected to database for master-follower")
+
+	// Load masters into cache
+	followerRepo = repository.NewFollowerRepository(db)
+	if err := masterCache.LoadFromDB(db); err != nil {
+		lg.Warn("Failed to load master cache: %v", err)
+	} else {
+		lg.Info("Loaded %d masters into cache", masterCache.Count())
+	}
+
+	// Initialize signal distributor
+	signalDistributor = distributor.NewSignalDistributor(10)
+	go followerOrderWorker()
+
+	// Update metrics
+	metrics.UpdateActiveMasters(masterCache.Count())
+}
+
+// followerOrderWorker processes follower orders from the distributor channel
+func followerOrderWorker() {
+	for order := range signalDistributor.GetQueueChannel() {
+		// In a real implementation, this would send the order to the follower's MT5 EA
+		// For now, we just log it
+		lg.Info("FOLLOWER ORDER: %s -> %s %s %.2f @ %.5f",
+			order.Signal.AccountID,
+			order.FollowerAccountID,
+			strings.ToUpper(order.Signal.Side),
+			order.Signal.Lot,
+			order.Signal.Price,
+		)
+
+		// Here you would:
+		// 1. Establish connection to follower's MT5 EA (or send via relay)
+		// 2. Push the signal to follower's queue
+		// 3. Record metrics
+	}
 }
 
 // keepRelayConnection giữ kết nối TCP tới relay, tự reconnect nếu rớt.
@@ -152,6 +236,66 @@ func sendToRelay(line []byte) {
 	}
 }
 
+// isMasterSignal checks if a signal is from a registered master account
+func isMasterSignal(accountID string) (string, bool) {
+	if masterCache == nil {
+		return "", false
+	}
+	return masterCache.Get(accountID)
+}
+
+// distributeToFollowers distributes a master signal to all active followers
+func distributeToFollowers(masterID string, sig sigpkg.Signal) {
+	if subStore == nil || followerRepo == nil || signalDistributor == nil {
+		return
+	}
+
+	startTime := time.Now()
+
+	// Get followers from Redis
+	ctx := context.Background()
+	followerAccountIDs, err := subStore.GetFollowers(ctx, masterID)
+	if err != nil {
+		lg.Error("Failed to get followers from Redis: %v", err)
+		metrics.RecordRedisError("SMEMBERS")
+		return
+	}
+
+	if len(followerAccountIDs) == 0 {
+		lg.Info("Master %s has no active followers", masterID)
+		return
+	}
+
+	// Get follower details from database
+	followers, err := followerRepo.GetByAccountIDs(ctx, followerAccountIDs)
+	if err != nil {
+		lg.Error("Failed to get follower details: %v", err)
+		metrics.RecordDatabaseError("SELECT")
+		return
+	}
+
+	if len(followers) == 0 {
+		return
+	}
+
+	// Distribute to all followers
+	result := signalDistributor.Distribute(masterID, sig, followers)
+
+	latencyMs := time.Since(startTime).Milliseconds()
+	metrics.RecordDistributionSuccess(masterID, result.SuccessCount, float64(latencyMs))
+
+	lg.Info("DISTRIBUTED: master=%s signal=%s/%s %.2f -> %d followers (%.2fms)",
+		masterID, sig.Action, sig.Side, sig.Lot, result.SuccessCount, float64(latencyMs)/1000)
+
+	if result.ErrorCount > 0 {
+		lg.Warn("Distribution had %d errors for master %s", result.ErrorCount, masterID)
+	}
+
+	if latencyMs > 100 {
+		lg.Warn("Distribution latency exceeded 100ms: %dms", latencyMs)
+	}
+}
+
 func handleConn(conn net.Conn) {
 	defer func() {
 		clientsMu.Lock()
@@ -193,12 +337,7 @@ func handleConn(conn net.Conn) {
 				lg.Warn("Invalid message from %s: %s", addr, raw)
 				continue
 			}
-			q.Push(sig)
-			tcpLog("RECV", addr, &sig)
-			if relayHost != "" {
-				sendToRelay(line)
-				tcpLog("FWD ", addr, &sig)
-			}
+			processSignal(addr, sig, line)
 			continue
 		}
 
@@ -208,22 +347,7 @@ func handleConn(conn net.Conn) {
 			continue
 		}
 
-		q.Push(sig)
-		tcpLog("RECV", addr, &sig)
-
-		if relayHost != "" {
-			sendToRelay(line)
-			// tcpLog("FWD ", addr, &sig)
-		}
-
-		ack := map[string]any{
-			"status": "queued",
-			"queue":  q.Size(),
-			"pnl":    sig.Pnl,
-			"time":   time.Now().Format(time.RFC3339),
-		}
-		ackBytes, _ := json.Marshal(ack)
-		conn.Write(append(ackBytes, '\n'))
+		processSignal(addr, sig, line)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -235,19 +359,83 @@ func handleConn(conn net.Conn) {
 	lg.Info("MT5 EA disconnected: %s", addr)
 }
 
+// processSignal handles a parsed signal - push to queue and check for master-follower
+func processSignal(addr string, sig sigpkg.Signal, rawLine []byte) {
+	// Push to queue for local processing
+	q.Push(sig)
+	tcpLog("RECV", addr, &sig)
+
+	// Check if this is a master signal
+	if sig.AccountID != "" {
+		masterID, isMaster := isMasterSignal(sig.AccountID)
+		if isMaster {
+			// Record received signal
+			metrics.SignalsReceived.WithLabelValues(masterID).Inc()
+
+			// Distribute to followers
+			distributeToFollowers(masterID, sig)
+		}
+	}
+
+	// Forward to relay if configured
+	if relayHost != "" {
+		sendToRelay(rawLine)
+		tcpLog("FWD ", addr, &sig)
+	}
+
+	// Send ACK back
+	ack := map[string]any{
+		"status": "queued",
+		"queue":  q.Size(),
+		"pnl":    sig.Pnl,
+		"time":   time.Now().Format(time.RFC3339),
+	}
+	ackBytes, _ := json.Marshal(ack)
+	conn, _ := getConnByAddr(addr)
+	if conn != nil {
+		conn.Write(append(ackBytes, '\n'))
+	}
+}
+
+// getConnByAddr finds a client connection by address
+func getConnByAddr(addr string) (net.Conn, bool) {
+	clientsMu.RLock()
+	defer clientsMu.RUnlock()
+	for conn, client := range clients {
+		if client.addr == addr {
+			return conn, true
+		}
+	}
+	return nil, false
+}
+
 func parsePipe(raw string) (sigpkg.Signal, bool) {
 	parts := strings.Split(strings.TrimSpace(raw), "|")
 	if len(parts) < 2 {
 		return sigpkg.Signal{}, false
 	}
 	sig := sigpkg.Signal{Action: parts[0], Side: parts[1], Symbol: parts[2], Time: time.Now()}
-	if len(parts) > 3 { fmt.Sscanf(parts[3], "%f", &sig.Lot) }
-	if len(parts) > 4 { fmt.Sscanf(parts[4], "%f", &sig.Price) }
-	if len(parts) > 5 { fmt.Sscanf(parts[5], "%f", &sig.SL) }
-	if len(parts) > 6 { fmt.Sscanf(parts[6], "%f", &sig.TP) }
-	if len(parts) > 7 { fmt.Sscanf(parts[7], "%d", &sig.Magic) }
-	if len(parts) > 8 { fmt.Sscanf(parts[8], "%f", &sig.Pnl) }
-	if len(parts) > 9 { sig.Comment = parts[9] }
+	if len(parts) > 3 {
+		fmt.Sscanf(parts[3], "%f", &sig.Lot)
+	}
+	if len(parts) > 4 {
+		fmt.Sscanf(parts[4], "%f", &sig.Price)
+	}
+	if len(parts) > 5 {
+		fmt.Sscanf(parts[5], "%f", &sig.SL)
+	}
+	if len(parts) > 6 {
+		fmt.Sscanf(parts[6], "%f", &sig.TP)
+	}
+	if len(parts) > 7 {
+		fmt.Sscanf(parts[7], "%d", &sig.Magic)
+	}
+	if len(parts) > 8 {
+		fmt.Sscanf(parts[8], "%f", &sig.Pnl)
+	}
+	if len(parts) > 9 {
+		sig.Comment = parts[9]
+	}
 	return sig, true
 }
 

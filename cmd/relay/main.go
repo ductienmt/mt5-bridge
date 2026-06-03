@@ -1,15 +1,12 @@
-// Relay: nhận signal qua TCP rồi forward lên server HTTP khác
-// TCP Bridge → Relay :1082 → http://103.72.56.53:8080
+// Relay: nhận signal qua TCP rồi forward lên server TCP khác
+// TCP Bridge → Relay :1082 → TCP Server
 package main
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -33,10 +30,9 @@ type Signal struct {
 	Comment  string  `json:"comment"`
 }
 
-// HttpPayload là payload gửi lên FORWARD_TO_URL/signal
+// TcpPayload là payload gửi tới server TCP đích
 // action = BUY/SELL/BUY_STOP/SELL_STOP/CLOSE/MODIFY/CLOSE_ALL (thứ server cần)
-// type field KHÔNG được gửi — server không hỗ trợ
-type HttpPayload struct {
+type TcpPayload struct {
 	Action  string  `json:"action"`
 	Symbol  string  `json:"symbol"`
 	Lot     float64 `json:"lot"`
@@ -64,8 +60,8 @@ func effectiveAction(s *Signal) string {
 	return ""
 }
 
-func signalToHttpPayload(s *Signal) *HttpPayload {
-	return &HttpPayload{
+func signalToTcpPayload(s *Signal) *TcpPayload {
+	return &TcpPayload{
 		Action:  effectiveAction(s),
 		Symbol:  s.Symbol,
 		Lot:     s.Lot,
@@ -78,19 +74,26 @@ func signalToHttpPayload(s *Signal) *HttpPayload {
 }
 
 var (
-	httpClient = &http.Client{Timeout: 10 * time.Second}
-	forwardURL string
-	lg         = newLogger()
+	lg            = newLogger()
+	forwardHost   string
+	forwardPort   string
+	serverConn    net.Conn
+	serverMu      sync.Mutex
+	serverClose   = make(chan struct{})
+	serverReady   = make(chan struct{})
 )
 
 func main() {
-	forwardURL = os.Getenv("FORWARD_TO_URL")
-	if forwardURL == "" {
-		lg.error("FORWARD_TO_URL not set — exiting")
+	forwardHost = os.Getenv("FORWARD_TO_HOST")
+	forwardPort = os.Getenv("FORWARD_TO_PORT")
+	if forwardHost == "" || forwardPort == "" {
+		lg.error("FORWARD_TO_HOST and FORWARD_TO_PORT must be set — exiting")
 		os.Exit(1)
 	}
-	forwardURL = strings.TrimSuffix(forwardURL, "/")
-	lg.info("FORWARD_TO_URL = %s", forwardURL)
+	lg.info("FORWARD_TO = %s:%s", forwardHost, forwardPort)
+
+	// Start TCP connection to forward server
+	go keepServerConnection()
 
 	port := getEnv("RELAY_PORT", "8082")
 	addr := ":" + port
@@ -100,13 +103,17 @@ func main() {
 		lg.error("Bind failed on %s: %v", addr, err)
 		os.Exit(1)
 	}
-	lg.info("Relay listening on %s -> %s/signal", addr, forwardURL)
+	lg.info("Relay listening on %s -> %s:%s", addr, forwardHost, forwardPort)
 
 	go func() {
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 		<-sigChan
 		lg.info("Shutting down relay...")
+		close(serverClose)
+		if serverConn != nil {
+			serverConn.Close()
+		}
 		ln.Close()
 		os.Exit(0)
 	}()
@@ -122,6 +129,86 @@ func main() {
 		}
 		go handleConn(conn)
 	}
+}
+
+// keepServerConnection giữ kết nối TCP tới server, tự reconnect nếu rớt.
+func keepServerConnection() {
+	for {
+		select {
+		case <-serverClose:
+			return
+		default:
+		}
+
+		addr := fmt.Sprintf("%s:%s", forwardHost, forwardPort)
+		conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+		if err != nil {
+			lg.warn("Cannot connect to server %s: %v — retry in 5s", addr, err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		serverMu.Lock()
+		serverConn = conn
+		serverMu.Unlock()
+
+		lg.info("Connected to server %s", addr)
+
+		// Signal ready
+		select {
+		case serverReady <- struct{}{}:
+		default:
+		}
+
+		// Đọc dữ liệu từ connection để detect disconnect
+		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		buf := make([]byte, 1)
+		_, err = conn.Read(buf)
+		if err != nil {
+			serverMu.Lock()
+			if serverConn == conn {
+				serverConn.Close()
+				serverConn = nil
+			}
+			serverMu.Unlock()
+			lg.warn("Server connection lost: %v — reconnecting...", err)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+	}
+}
+
+// sendToServer forward signal sang server qua TCP connection đang có.
+func sendToServer(line []byte) error {
+	// Đợi connection sẵn sàng
+	select {
+	case <-serverReady:
+	case <-time.After(30 * time.Second):
+		return fmt.Errorf("timeout waiting for server connection")
+	}
+
+	serverMu.Lock()
+	conn := serverConn
+	serverMu.Unlock()
+
+	if conn == nil {
+		return fmt.Errorf("no server connection")
+	}
+
+	// Gửi plain JSON newline-delimited
+	data := append(line, '\n')
+	_, err := conn.Write(data)
+	if err != nil {
+		serverMu.Lock()
+		if serverConn != nil {
+			serverConn.Close()
+			serverConn = nil
+		}
+		serverMu.Unlock()
+		return err
+	}
+
+	return nil
 }
 
 func handleConn(conn net.Conn) {
@@ -154,54 +241,24 @@ func handleConn(conn net.Conn) {
 		// ── RECV ──────────────────────────────────────────
 		lg.received(peer, &sig)
 
-		// Build payload: action=BUY/SELL/MODIFY/CLOSE (no Type field)
-		payload := signalToHttpPayload(&sig)
+		// Build payload for TCP
+		payload := signalToTcpPayload(&sig)
 
-		// Forward lên HTTP server
-		respBody, httpStatus, err := forwardSignal(payload)
+		// Forward tới server TCP
+		err := sendToServer(line)
 		latency := time.Since(sentAt)
 
 		if err != nil {
-			lg.error("FWD->%s FAIL %s %s %s %.2f | %v",
-				forwardURL, sig.Action, payload.Action, payload.Symbol, payload.Lot, err)
+			lg.error("FWD->%s:%s FAIL %s %s %s %.2f | %v",
+				forwardHost, forwardPort, sig.Action, payload.Action, payload.Symbol, payload.Lot, err)
 			conn.Write([]byte(fmt.Sprintf(`{"ok":false,"error":"%v"}`+"\n", err)))
 			continue
 		}
 
 		// ── SENT ──────────────────────────────────────────
-		lg.sent(forwardURL, payload, httpStatus, latency)
-		conn.Write(append(respBody, '\n'))
+		lg.sent(forwardHost, payload, latency)
+		conn.Write([]byte(`{"ok":true}` + "\n"))
 	}
-}
-
-func forwardSignal(payload *HttpPayload) ([]byte, int, error) {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	req, err := http.NewRequest(http.MethodPost, forwardURL+"/signal", bytes.NewReader(body))
-	if err != nil {
-		return nil, 0, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer resp.Body.Close()
-
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
-	if err != nil {
-		return nil, resp.StatusCode, err
-	}
-
-	if resp.StatusCode >= 400 {
-		return data, resp.StatusCode, fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-
-	return data, resp.StatusCode, nil
 }
 
 func parsePipe(raw string) Signal {
@@ -270,7 +327,7 @@ func (l *logger) received(from string, s *Signal) {
 	_ = s
 }
 
-func (l *logger) sent(to string, p *HttpPayload, httpStatus int, latency time.Duration) {
+func (l *logger) sent(to string, p *TcpPayload, latency time.Duration) {
 	var color string
 	switch strings.ToUpper(p.Action) {
 	case "BUY", "BUY_STOP":
@@ -294,9 +351,9 @@ func (l *logger) sent(to string, p *HttpPayload, httpStatus int, latency time.Du
 	}
 
 	fmt.Printf(
-		"[%s] \x1b[36mSENT\x1b[0m \x1b[90m-> %s\x1b[0m | %s%s %s %.2f | SL=%.5f TP=%.5f | magic=%d | pnl=%+.2f | resp=%d | %s%s\n",
+		"[%s] \x1b[36mSENT\x1b[0m \x1b[90m-> %s:%s\x1b[0m | %s%s %s %.2f | SL=%.5f TP=%.5f | magic=%d | pnl=%+.2f | %s%s\n",
 		time.Now().Format("15:04:05"),
-		to,
+		to, forwardPort,
 		color, strings.ToUpper(p.Action),
 		p.Symbol,
 		p.Lot,
@@ -304,7 +361,6 @@ func (l *logger) sent(to string, p *HttpPayload, httpStatus int, latency time.Du
 		p.TP,
 		p.Magic,
 		p.Pnl,
-		httpStatus,
 		latency.Round(time.Millisecond),
 		comment,
 	)

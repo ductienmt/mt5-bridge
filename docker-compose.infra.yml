@@ -1,0 +1,64 @@
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: mt5-postgres
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-admin123}
+      POSTGRES_DB: ${POSTGRES_DB:-mt5_bridge}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - mt5-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: mt5-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    command: redis-server --requirepass ${REDIS_PASSWORD:-admin123}
+    volumes:
+      - redis_data:/data
+    networks:
+      - mt5-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis Commander - Redis Management Tool
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: mt5-redis-commander
+    ports:
+      - "${REDIS_COMMANDER_PORT:-8081}:8081"
+    environment:
+      REDIS_HOSTS: local:mt5-redis:6379:0:${REDIS_PASSWORD:-admin123}
+    networks:
+      - mt5-net
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  mt5-net:
+    name: mt5-net
+    driver: bridge
