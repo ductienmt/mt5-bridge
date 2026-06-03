@@ -132,6 +132,9 @@ func main() {
 
 // keepServerConnection giữ kết nối TCP tới server, tự reconnect nếu rớt.
 func keepServerConnection() {
+	pingInterval := 30 * time.Second // Ping mỗi 30s để giữ connection alive
+	addr := fmt.Sprintf("%s:%s", forwardHost, forwardPort)
+
 	for {
 		select {
 		case <-serverClose:
@@ -141,7 +144,6 @@ func keepServerConnection() {
 		default:
 		}
 
-		addr := fmt.Sprintf("%s:%s", forwardHost, forwardPort)
 		conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 		if err != nil {
 			lg.warn("Cannot connect to server %s: %v — retry in 5s", addr, err)
@@ -160,22 +162,53 @@ func keepServerConnection() {
 
 		lg.info("Connected to server %s", addr)
 
-		// Connection thành công, đợi cho đến khi bị đóng
-		<-serverClose
-		return
+		// Giữ connection alive bằng ping định kỳ
+		pingTicker := time.NewTicker(pingInterval)
+		defer pingTicker.Stop()
+
+		for {
+			select {
+			case <-serverClose:
+				conn.Close()
+				return
+			case <-reconnectServer:
+				conn.Close()
+				goto reconnectLoop
+			case <-pingTicker.C:
+				// Gửi ping nhẹ để giữ connection alive
+				serverMu.Lock()
+				currentConn := serverConn
+				serverMu.Unlock()
+
+				if currentConn != conn {
+					conn.Close()
+					goto reconnectLoop
+				}
+
+				// Thử write một byte null để check connection
+				conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+				_, err := conn.Write([]byte{})
+				if err != nil {
+					lg.warn("Server connection lost (keep-alive): %v", err)
+					conn.Close()
+					goto reconnectLoop
+				}
+			}
+		}
+	reconnectLoop:
 	}
 }
 
 // reconnectServer dùng để notify cho keepServerConnection biết cần reconnect
 var reconnectServer = make(chan struct{}, 1)
 
-// sendToServer forward signal sang server qua TCP connection đang có.
-// Nếu chưa có connection, đợi cho đến khi có.
-// Nếu connection bị đóng, trigger reconnect.
+// sendToServer forward signal sang server.
+// Nếu chưa có connection hoặc connection bị đóng, dial mới ngay lập tức.
 func sendToServer(line []byte) error {
-	// Đợi connection sẵn sàng (tối đa 30 giây)
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
+	addr := fmt.Sprintf("%s:%s", forwardHost, forwardPort)
+
+	// Thử gửi với connection hiện tại
+	for attempt := 0; attempt < 3; attempt++ {
 		serverMu.Lock()
 		conn := serverConn
 		serverMu.Unlock()
@@ -185,32 +218,67 @@ func sendToServer(line []byte) error {
 			data := append(line, '\n')
 			_, err := conn.Write(data)
 			if err != nil {
-				// Connection bị đóng, trigger reconnect
+				// Connection bị đóng, trigger reconnect và dial mới
 				serverMu.Lock()
 				if serverConn != nil {
 					serverConn.Close()
 					serverConn = nil
 				}
 				serverMu.Unlock()
-				
-				// Trigger reconnect
+
+				// Signal cho keepServerConnection biết cần reconnect
 				select {
 				case reconnectServer <- struct{}{}:
 				default:
 				}
-				
-				// Đợi một chút rồi thử lại
-				time.Sleep(100 * time.Millisecond)
-				continue
+			} else {
+				// Thành công!
+				return nil
 			}
-			return nil
 		}
 
-		// Chưa có connection, đợi 100ms rồi thử lại
-		time.Sleep(100 * time.Millisecond)
+		// Chưa có connection, dial mới ngay
+		conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+		if err != nil {
+			lg.warn("Dial failed: %v — retry in 500ms", err)
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+
+		// Tắt Nagle's Algorithm
+		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			tcpConn.SetNoDelay(true)
+		}
+
+		serverMu.Lock()
+		serverConn = conn
+		serverMu.Unlock()
+
+		lg.info("Connected to server %s (send)", addr)
+
+		// Thử gửi ngay với connection mới
+		data := append(line, '\n')
+		_, err = conn.Write(data)
+		if err != nil {
+			serverMu.Lock()
+			if serverConn != nil {
+				serverConn.Close()
+				serverConn = nil
+			}
+			serverMu.Unlock()
+
+			select {
+			case reconnectServer <- struct{}{}:
+			default:
+			}
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+
+		return nil
 	}
 
-	return fmt.Errorf("timeout waiting for server connection")
+	return fmt.Errorf("failed after 3 attempts")
 }
 
 func handleConn(conn net.Conn) {
